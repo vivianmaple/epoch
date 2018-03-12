@@ -47,40 +47,8 @@ info() ->
             {error, {unexpected_status, Status, Response}}
     end.
 
-create_container(Name, Config) ->
-    BodyObj = maps:fold(fun
-        (hostname, Hostname, Body) ->
-            Body#{'Hostname' => json_string(Hostname)};
-        (image, Image, Body) ->
-            Body#{'Image' => json_string(Image)};
-        (env, Env, Body) ->
-            EnvList = [json_string(K ++ "=" ++ V)
-                       || {K, V} <- maps:to_list(Env)],
-            Body#{'Env' => EnvList};
-        (volumes, VolSpecs, Body) ->
-            {Volumes, Bindings} = lists:foldl(fun
-                ({rw, HostVol, NodeVol}, {VolAcc, BindAcc}) ->
-                    {VolAcc#{json_string(NodeVol) => #{}},
-                     [format("~s:~s", [HostVol, NodeVol]) | BindAcc]};
-                ({ro, HostVol, NodeVol}, {VolAcc, BindAcc}) ->
-                    {VolAcc#{json_string(NodeVol) => #{}},
-                     [format("~s:~s:ro", [HostVol, NodeVol]) | BindAcc]}
-            end, {#{}, []}, VolSpecs),
-            HostConfig = maps:get('HostConfig', Body, #{}),
-            HostConfig2 = HostConfig#{'Binds' => Bindings},
-            Body#{'HostConfig' => HostConfig2, 'Volumes' => Volumes};
-        (ports, PortSpecs, Body) ->
-            {Exposed, Bindings} = lists:foldl(fun
-                ({Proto, HostPort, ExtPort}, {ExpAcc, BindAcc}) ->
-                    Key = format("~w/~s", [ExtPort, Proto]),
-                    PortStr = format("~w", [HostPort]),
-                    HostSpec = [#{'HostPort' => PortStr}],
-                    {ExpAcc#{Key => #{}}, BindAcc#{Key => HostSpec}}
-            end, {#{}, #{}}, PortSpecs),
-            HostConfig = maps:get('HostConfig', Body, #{}),
-            HostConfig2 = HostConfig#{'PortBindings' => Bindings},
-            Body#{'HostConfig' => HostConfig2, 'ExposedPorts' => Exposed}
-    end, #{}, Config),
+create_container(Name, #{image := Image} = Config) ->
+    BodyObj = maps:fold(fun create_body_object/3, #{}, Config),
     case docker_post(?DOCKER_CONTAINERS_CREATE, #{name => Name}, BodyObj) of
         {error, _Reason} = Error -> Error;
         {ok, 409, _Response} -> {error, container_conflict};
@@ -124,6 +92,39 @@ stop_container(NameOrId, Timeout) ->
 
 
 %=== INTERNAL FUNCTIONS ========================================================
+
+create_body_object(hostname, Hostname, Body) ->
+    Body#{'Hostname' => json_string(Hostname)};
+create_body_object(image, Image, Body) ->
+    Body#{'Image' => json_string(Image)};
+create_body_object(env, Env, Body) ->
+    EnvList = [json_string(K ++ "=" ++ V) || {K, V} <- maps:to_list(Env)],
+    Body#{'Env' => EnvList};
+create_body_object(volumes, VolSpecs, Body) ->
+    {Volumes, Bindings} = lists:foldl(fun
+        ({rw, HostVol, NodeVol}, {VolAcc, BindAcc}) ->
+            {VolAcc#{json_string(NodeVol) => #{}},
+             [format("~s:~s", [HostVol, NodeVol]) | BindAcc]};
+        ({ro, HostVol, NodeVol}, {VolAcc, BindAcc}) ->
+            {VolAcc#{json_string(NodeVol) => #{}},
+             [format("~s:~s:ro", [HostVol, NodeVol]) | BindAcc]}
+    end, {#{}, []}, VolSpecs),
+    HostConfig = maps:get('HostConfig', Body, #{}),
+    HostConfig2 = HostConfig#{'Binds' => Bindings},
+    Body#{'HostConfig' => HostConfig2, 'Volumes' => Volumes};
+create_body_object(ports, PortSpecs, Body) ->
+    {Exposed, Bindings} = lists:foldl(fun
+        ({Proto, HostPort, ExtPort}, {ExpAcc, BindAcc}) ->
+            Key = format("~w/~s", [ExtPort, Proto]),
+            PortStr = format("~w", [HostPort]),
+            HostSpec = [#{'HostPort' => PortStr}],
+            {ExpAcc#{Key => #{}}, BindAcc#{Key => HostSpec}}
+    end, {#{}, #{}}, PortSpecs),
+    HostConfig = maps:get('HostConfig', Body, #{}),
+    HostConfig2 = HostConfig#{'PortBindings' => Bindings},
+    Body#{'HostConfig' => HostConfig2, 'ExposedPorts' => Exposed};
+create_body_object(Key, _Value, _Body) ->
+    error({unknown_create_param, Key}).
 
 format(Fmt, Args) ->
     iolist_to_binary(io_lib:format(Fmt, Args)).
@@ -191,7 +192,6 @@ encode(JsonObj) ->
     catch
         error:badarg -> {error, bad_json}
     end.
-
 
 json_string(Atom) when is_atom(Atom) -> Atom;
 json_string(Bin) when is_binary(Bin) -> Bin;
