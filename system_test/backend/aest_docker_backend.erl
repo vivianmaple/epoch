@@ -2,7 +2,7 @@
 %%%-------------------------------------------------------------------
 %%% @copyright (C) 2017, Aeternity Anstalt
 %%%-------------------------------------------------------------------
--module(system_test_backend_docker).
+-module(aest_docker_backend).
 
 
 
@@ -60,7 +60,7 @@ setup_node(NodeState, NodeStates, TestCtx) ->
         volumes => [{ro, ConfigFilePath, ?EPOCH_CONFIG_FILE}],
         ports => [{tcp, HostPort, ExtPort}]
     },
-    case docker_utils:create_container(ContName, DockerConfig) of
+    case aest_docker:create_container(ContName, DockerConfig) of
         {error, _Reason} = Error -> Error;
         {ok, Res} ->
             #{'Id' := ContId} = Res,
@@ -76,21 +76,21 @@ setup_node(NodeState, NodeStates, TestCtx) ->
 
 delete_node(NodeState, TestCtx) ->
     #{container_id := Id} = NodeState,
-    case docker_utils:delete_container(Id) of
+    case aest_docker:delete_container(Id) of
         {error, _Reason} = Error -> Error;
         ok -> {ok, NodeState, TestCtx}
     end.
 
 start_node(NodeState, TestCtx) ->
     #{container_id := Id} = NodeState,
-    case docker_utils:start_container(Id) of
+    case aest_docker:start_container(Id) of
         {error, _Reason} = Error -> Error;
         ok -> {ok, NodeState, TestCtx}
     end.
 
 stop_node(NodeState, Timeout, TestCtx) ->
     #{container_id := Id} = NodeState,
-    case docker_utils:stop_container(Id, Timeout) of
+    case aest_docker:stop_container(Id, Timeout) of
         {error, _Reason} = Error -> Error;
         ok -> {ok, NodeState, TestCtx}
     end.

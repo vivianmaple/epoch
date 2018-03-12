@@ -2,7 +2,7 @@
 %%%-------------------------------------------------------------------
 %%% @copyright (C) 2017, Aeternity Anstalt
 %%%-------------------------------------------------------------------
--module(system_test_utils).
+-module(aest_utils).
 
 -behaviour(gen_server).
 
@@ -115,7 +115,7 @@ call(Pid, Msg) ->
     gen_server:call(Pid, Msg, 60000).
 
 setup(DataDir, TempDir) ->
-    case docker_utils:start() of
+    case aest_docker:start() of
         ok -> start(DataDir, TempDir);
         Error -> Error
     end.
@@ -150,7 +150,7 @@ mgr_cleanup(State0) ->
     #{nodes := Nodes0} = State0,
     State1 = maps:fold(fun(Name, NodeState, State) ->
         #{ctx := Ctx, nodes := Nodes} = State,
-        case system_test_backend:stop_node(NodeState, ?STOP_TIMEOUT, Ctx) of
+        case aest_backend:stop_node(NodeState, ?STOP_TIMEOUT, Ctx) of
             {error, _Reason} ->
                 %% Maybe we should log something ?
                 State;
@@ -161,7 +161,7 @@ mgr_cleanup(State0) ->
     #{nodes := Nodes1} = State1,
     State2 = maps:fold(fun(Name, NodeState, State) ->
         #{ctx := Ctx, nodes := Nodes} = State,
-        case system_test_backend:delete_node(NodeState, Ctx) of
+        case aest_backend:delete_node(NodeState, Ctx) of
             {error, _Reason} ->
                 %% Maybe we should log something ?
                 State;
@@ -178,14 +178,14 @@ mgr_setup_nodes(NodeSpecs, State) ->
     {PrepNodes, TestCtx2} = lists:foldl(
         fun(#{name := Name} = Spec, {Acc, Ctx}) ->
             {ok, NodeState, NewCtx} =
-                system_test_backend:prepare_node(Spec, Ctx),
+                aest_backend:prepare_node(Spec, Ctx),
             {Acc#{Name => NodeState}, NewCtx}
         end, {#{}, TestCtx}, NodeSpecs),
     AllNodes = maps:merge(Nodes, PrepNodes),
     {Nodes2, TestCtx3} = maps:fold(
         fun(Name, NodeState, {Acc, Ctx}) ->
             {ok, NewNodeState, NewCtx} =
-                system_test_backend:setup_node(NodeState, AllNodes, Ctx),
+                aest_backend:setup_node(NodeState, AllNodes, Ctx),
             {Acc#{Name => NewNodeState}, NewCtx}
         end, {Nodes, TestCtx2}, PrepNodes),
     {ok, State#{ctx := TestCtx3, nodes := Nodes2}}.
@@ -195,7 +195,7 @@ mgr_start_node(NodeName, State) ->
     case maps:find(NodeName, Nodes) of
         error -> {error, node_not_found};
         {ok, NodeState} ->
-            case system_test_backend:start_node(NodeState, TestCtx) of
+            case aest_backend:start_node(NodeState, TestCtx) of
                 {error, _Reason} = Error -> Error;
                 {ok, NodeState2, TestCtx2} ->
                     Nodes2 = Nodes#{NodeName := NodeState2},

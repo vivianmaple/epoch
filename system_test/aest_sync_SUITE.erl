@@ -2,7 +2,7 @@
 %%%-------------------------------------------------------------------
 %%% @copyright (C) 2017, Aeternity Anstalt
 %%%-------------------------------------------------------------------
--module(system_sync_SUITE).
+-module(aest_sync_SUITE).
 
 %=== EXPORTS ===================================================================
 
@@ -17,7 +17,7 @@
 
 %=== INCLUDES ==================================================================
 
--include("system_test_utils.hrl").
+-include("aest_utils.hrl").
 
 
 %=== MACROS ====================================================================
@@ -53,10 +53,10 @@ all() ->
     [new_node_join_old_network].
 
 init_per_testcase(_TC, Config) ->
-    system_test_utils:ct_setup(Config).
+    aest_utils:ct_setup(Config).
 
 end_per_testcase(_TC, Config) ->
-    system_test_utils:ct_cleanup(Config).
+    aest_utils:ct_cleanup(Config).
 
 
 %=== TEST CASES ================================================================
