@@ -112,7 +112,7 @@ stop(Pid) ->
     gen_server:stop(Pid).
 
 call(Pid, Msg) ->
-    gen_server:call(Pid, Msg).
+    gen_server:call(Pid, Msg, 60000).
 
 setup(DataDir, TempDir) ->
     case docker_utils:start() of
