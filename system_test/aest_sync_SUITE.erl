@@ -1,7 +1,3 @@
-%%% -*- erlang-indent-level: 4 -*-
-%%%-------------------------------------------------------------------
-%%% @copyright (C) 2017, Aeternity Anstalt
-%%%-------------------------------------------------------------------
 -module(aest_sync_SUITE).
 
 %=== EXPORTS ===================================================================
@@ -14,11 +10,9 @@
 % Test cases
 -export([new_node_join_old_network/1]).
 
-
 %=== INCLUDES ==================================================================
 
 -include("aest_utils.hrl").
-
 
 %=== MACROS ====================================================================
 
@@ -45,8 +39,6 @@
     source  => {pull, "aetrnty/epoch:local"}
 }).
 
-
-
 %=== COMMON TEST FUNCTIONS =====================================================
 
 all() ->
@@ -57,7 +49,6 @@ init_per_testcase(_TC, Config) ->
 
 end_per_testcase(_TC, Config) ->
     aest_utils:ct_cleanup(Config).
-
 
 %=== TEST CASES ================================================================
 
@@ -70,4 +61,3 @@ new_node_join_old_network(Cfg) ->
     ?start_node(node3, Cfg),
     ?wait_for_height(20, [node3], 5 * ?MINING_TIMOUT, Cfg),
     ?assert_synchronized([node1, node3], Cfg).
-

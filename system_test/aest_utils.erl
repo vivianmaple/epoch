@@ -1,11 +1,6 @@
-%%% -*- erlang-indent-level: 4 -*-
-%%%-------------------------------------------------------------------
-%%% @copyright (C) 2017, Aeternity Anstalt
-%%%-------------------------------------------------------------------
 -module(aest_utils).
 
 -behaviour(gen_server).
-
 
 %=== EXPORTS ===================================================================
 
@@ -25,7 +20,6 @@
 -export([handle_cast/2]).
 -export([handle_info/2]).
 
-
 %=== MACROS ====================================================================
 
 -define(CALL_TAG, ?MODULE).
@@ -34,7 +28,6 @@
 -define(TEST_CTX_FIRST_LOCAL_PORT, 3001).
 
 -define(STOP_TIMEOUT, 3). % In seconds
-
 
 %=== COMMON TEST API FUNCTIONS =================================================
 
@@ -54,7 +47,6 @@ ct_cleanup(Config) ->
             erlang:error({system_test_cleanup_failed, [{reason, Reason}]})
     end.
 
-
 %=== GENERIC API FUNCTIONS =====================================================
 
 setup_nodes(NodeSpecs, Ctx) ->
@@ -68,7 +60,6 @@ wait_for_height(_MinHeight, _NodeNames, _Timeout, _Ctx) ->
 
 assert_synchronized(_NodeNames, _Ctx) ->
     ok.
-
 
 %=== BEHAVIOUR GEN_SERVER CALLBACK FUNCTIONS ===================================
 
@@ -86,10 +77,8 @@ handle_call(_Msg, _From, State) ->
 handle_info(_Msg, State) ->
     {noreply, State}.
 
-
 handle_cast(_Msg, State) ->
     {noreply, State}.
-
 
 %=== INTERNAL FUNCTIONS ========================================================
 
@@ -134,7 +123,6 @@ call_reply({ok, Result, NewState}, _OldState) ->
     {reply, {ok, Result}, NewState};
 call_reply(Error, OldState) ->
     {reply, Error, OldState}.
-
 
 %--- NODE MANAGER PROCESS FUNCTION ---------------------------------------------
 

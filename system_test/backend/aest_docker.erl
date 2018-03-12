@@ -1,9 +1,4 @@
-%%% -*- erlang-indent-level: 4 -*-
-%%%-------------------------------------------------------------------
-%%% @copyright (C) 2017, Aeternity Anstalt
-%%%-------------------------------------------------------------------
 -module(aest_docker).
-
 
 %=== EXPORTS ===================================================================
 
@@ -14,7 +9,6 @@
 -export([delete_container/1]).
 -export([start_container/1]).
 -export([stop_container/2]).
-
 
 %=== MACROS ====================================================================
 
@@ -29,7 +23,6 @@
 
 -define(JSX_DECODE_OPTS, [{labels, attempt_atom}, return_maps]).
 -define(JSX_ENCODE_OPTS, []).
-
 
 %=== API FUNCTIONS =============================================================
 
@@ -89,7 +82,6 @@ stop_container(NameOrId, Timeout) ->
         {ok, Status, Response} ->
             {error, {unexpected_status, Status, Response}}
     end.
-
 
 %=== INTERNAL FUNCTIONS ========================================================
 
@@ -196,4 +188,3 @@ encode(JsonObj) ->
 json_string(Atom) when is_atom(Atom) -> Atom;
 json_string(Bin) when is_binary(Bin) -> Bin;
 json_string(Str) when is_list(Str) -> list_to_binary(Str).
-

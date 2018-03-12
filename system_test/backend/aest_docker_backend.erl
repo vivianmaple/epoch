@@ -1,10 +1,4 @@
-%%% -*- erlang-indent-level: 4 -*-
-%%%-------------------------------------------------------------------
-%%% @copyright (C) 2017, Aeternity Anstalt
-%%%-------------------------------------------------------------------
 -module(aest_docker_backend).
-
-
 
 %=== EXPORTS ===================================================================
 
@@ -15,12 +9,10 @@
 -export([start_node/2]).
 -export([stop_node/3]).
 
-
 %=== MACROS ====================================================================
 
 -define(CONFIG_FILE_TEMPLATE, "epoch.yaml.mustache").
 -define(EPOCH_CONFIG_FILE, "/home/epoch/epoch.yaml").
-
 
 %=== GENERIC API FUNCTIONS =====================================================
 
@@ -34,7 +26,6 @@ prepare_node(NodeSpec, TestCtx) ->
         ext_addr => ExtAddr
     },
     {ok, NodeState, TestCtx}.
-
 
 setup_node(NodeState, NodeStates, TestCtx) ->
     #{test_id := TestId,
@@ -95,7 +86,6 @@ stop_node(NodeState, Timeout, TestCtx) ->
         ok -> {ok, NodeState, TestCtx}
     end.
 
-
 %=== INTERNAL FUNCTIONS ========================================================
 
 format(Fmt, Args) ->
@@ -105,4 +95,3 @@ write_template(TemplateFile, OutputFile, Context) ->
     Template = bbmustache:parse_file(TemplateFile),
     Data = bbmustache:compile(Template, Context, [{key_type, atom}]),
     file:write_file(OutputFile, Data).
-
