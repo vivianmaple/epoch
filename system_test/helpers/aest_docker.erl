@@ -9,6 +9,7 @@
 -export([delete_container/1]).
 -export([start_container/1]).
 -export([stop_container/2]).
+-export([inspect/1]).
 
 %=== MACROS ====================================================================
 
@@ -83,6 +84,10 @@ stop_container(NameOrId, Timeout) ->
             {error, {unexpected_status, Status, Response}}
     end.
 
+inspect(ID) ->
+    {ok, 200, Info} = docker_get([<<"containers/">>, ID, <<"/json">>]),
+    Info.
+
 %=== INTERNAL FUNCTIONS ========================================================
 
 create_body_object(hostname, Hostname, Body) ->
@@ -106,8 +111,8 @@ create_body_object(volumes, VolSpecs, Body) ->
     Body#{'HostConfig' => HostConfig2, 'Volumes' => Volumes};
 create_body_object(ports, PortSpecs, Body) ->
     {Exposed, Bindings} = lists:foldl(fun
-        ({Proto, HostPort, ExtPort}, {ExpAcc, BindAcc}) ->
-            Key = format("~w/~s", [ExtPort, Proto]),
+        ({Proto, HostPort, ContainerPort}, {ExpAcc, BindAcc}) ->
+            Key = format("~w/~s", [ContainerPort, Proto]),
             PortStr = format("~w", [HostPort]),
             HostSpec = [#{'HostPort' => PortStr}],
             {ExpAcc#{Key => #{}}, BindAcc#{Key => HostSpec}}

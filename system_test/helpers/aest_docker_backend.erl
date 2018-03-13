@@ -16,25 +16,21 @@
 
 %=== GENERIC API FUNCTIONS =====================================================
 
-prepare_node(NodeSpec, TestCtx) ->
-    #{name := Hostname} = NodeSpec,
-    ExtAddr = format("http://~s:3013/", [Hostname]),
+prepare_node(#{name := Name} = NodeSpec, TestCtx) ->
     NodeState = #{
         spec => NodeSpec,
-        hostname => Hostname,
-        ext_port => 3013,
-        ext_addr => ExtAddr
+        hostname => Name,
+        ports => [3013, 3113, 3114]
     },
     {ok, NodeState, TestCtx}.
 
 setup_node(NodeState, NodeStates, TestCtx) ->
     #{test_id := TestId,
-      next_port := HostPort,
+      next_port := NextPort,
       data_dir := DataDir,
       temp_dir := TempDir} = TestCtx,
-    #{spec := NodeSpec, hostname := Hostname, ext_port := ExtPort} = NodeState,
+    #{spec := NodeSpec, hostname := Hostname, ports := Ports} = NodeState,
     #{peers := PeerNames, source := {pull, Image}} = NodeSpec,
-    HostAddr = format("http://~s:~w/", [Hostname, HostPort]),
     ConfigFileName = format("epoch_~s.yaml", [Hostname]),
     ConfigFilePath = filename:join(TempDir, ConfigFileName),
     TemplateFile = filename:join(DataDir, ?CONFIG_FILE_TEMPLATE),
@@ -44,25 +40,25 @@ setup_node(NodeState, NodeStates, TestCtx) ->
     Context = [{epoch_config, maps:to_list(NodeState#{peers => ExpandedPeers})}],
     ok = write_template(TemplateFile, ConfigFilePath, Context),
     ContName = format("~s_~s", [Hostname, TestId]),
+    {NextPort2, PortMapping} = lists:foldl(fun(Port, {Next, Mapping}) ->
+        {Next + 1, [{tcp, Next, Port}|Mapping]}
+    end, {NextPort, []}, Ports),
     DockerConfig = #{
         hostname => ContName,
         image => Image,
         env => #{"EPOCH_CONFIG" => ?EPOCH_CONFIG_FILE},
         volumes => [{ro, ConfigFilePath, ?EPOCH_CONFIG_FILE}],
-        ports => [{tcp, HostPort, ExtPort}]
+        ports => PortMapping
     },
     case aest_docker:create_container(ContName, DockerConfig) of
         {error, _Reason} = Error -> Error;
-        {ok, Res} ->
-            #{'Id' := ContId} = Res,
+        {ok, #{'Id' := ContId}} ->
             NodeState2 = NodeState#{
                 container_name => ContName,
                 container_id => ContId,
-                host_port => HostPort,
-                host_addr => HostAddr,
                 config_path => ConfigFilePath
             },
-            {ok, NodeState2, TestCtx#{next_port := HostPort + 1}}
+            {ok, NodeState2, TestCtx#{next_port := NextPort2}}
     end.
 
 delete_node(NodeState, TestCtx) ->
@@ -76,7 +72,9 @@ start_node(NodeState, TestCtx) ->
     #{container_id := Id} = NodeState,
     case aest_docker:start_container(Id) of
         {error, _Reason} = Error -> Error;
-        ok -> {ok, NodeState, TestCtx}
+        ok ->
+            Info = aest_docker:inspect(Id),
+            {ok, NodeState#{ports => get_in(Info, ['NetworkSettings', 'Ports'])}, TestCtx}
     end.
 
 stop_node(NodeState, Timeout, TestCtx) ->
@@ -95,3 +93,6 @@ write_template(TemplateFile, OutputFile, Context) ->
     Template = bbmustache:parse_file(TemplateFile),
     Data = bbmustache:compile(Template, Context, [{key_type, atom}]),
     file:write_file(OutputFile, Data).
+
+get_in(Map, [Key])      -> maps:get(Key, Map);
+get_in(Map, [Key|Keys]) -> get_in(maps:get(Key, Map), Keys).

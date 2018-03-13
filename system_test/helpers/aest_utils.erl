@@ -55,8 +55,9 @@ setup_nodes(NodeSpecs, Ctx) ->
 start_node(NodeName, Ctx) ->
     call(ctx2pid(Ctx), {start_node, NodeName}).
 
-wait_for_height(_MinHeight, _NodeNames, _Timeout, _Ctx) ->
-    ok.
+wait_for_height(_MinHeight, _NodeNames, _Timeout, Ctx) ->
+    Nodes = call(ctx2pid(Ctx), get_nodes),
+    ct:log("~p~n", [Nodes]).
 
 assert_synchronized(_NodeNames, _Ctx) ->
     ok.
@@ -70,10 +71,13 @@ handle_call({setup_nodes, NodeSpecs}, _From, State) ->
     call_reply(mgr_setup_nodes(NodeSpecs, State), State);
 handle_call({start_node, NodeName}, _From, State) ->
     call_reply(mgr_start_node(NodeName, State), State);
+handle_call(get_nodes, _From, #{nodes := Nodes} = State) ->
+    {reply, Nodes, State};
 handle_call(cleanup, _From, State) ->
     call_reply(mgr_cleanup(State), State);
-handle_call(_Msg, _From, State) ->
-    {reply, {error, unexpected_call}, State}.
+handle_call(Request, From, _State) ->
+    error({unknown_request, Request, From}).
+
 handle_info(_Msg, State) ->
     {noreply, State}.
 
