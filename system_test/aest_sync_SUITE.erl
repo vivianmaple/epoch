@@ -10,9 +10,12 @@
 % Test cases
 -export([new_node_join_old_network/1]).
 
-%=== INCLUDES ==================================================================
-
--include("helpers/aest_utils.hrl").
+-import(aest_utils, [
+    setup_nodes/2,
+    start_node/2,
+    wait_for_height/4,
+    assert_synchronized/2
+]).
 
 %=== MACROS ====================================================================
 
@@ -53,11 +56,11 @@ end_per_testcase(_TC, Config) ->
 %=== TEST CASES ================================================================
 
 new_node_join_old_network(Cfg) ->
-    ?setup_nodes([?NODE1, ?NODE2, ?NODE3], Cfg),
-    ?start_node(node1, Cfg),
-    ?start_node(node2, Cfg),
-    ?wait_for_height(20, [node1, node2], 20 * ?MINING_TIMOUT, Cfg),
-    ?assert_synchronized([node1, node2], Cfg),
-    ?start_node(node3, Cfg),
-    ?wait_for_height(20, [node3], 5 * ?MINING_TIMOUT, Cfg),
-    ?assert_synchronized([node1, node3], Cfg).
+    setup_nodes([?NODE1, ?NODE2, ?NODE3], Cfg),
+    start_node(node1, Cfg),
+    start_node(node2, Cfg),
+    wait_for_height(20, [node1, node2], 20 * ?MINING_TIMOUT, Cfg),
+    assert_synchronized([node1, node2], Cfg),
+    start_node(node3, Cfg),
+    wait_for_height(20, [node3], 5 * ?MINING_TIMOUT, Cfg),
+    assert_synchronized([node1, node3], Cfg).
