@@ -50,39 +50,28 @@ setup_node(NodeState, NodeStates, TestCtx) ->
         volumes => [{ro, ConfigFilePath, ?EPOCH_CONFIG_FILE}],
         ports => PortMapping
     },
-    case aest_docker:create_container(ContName, DockerConfig) of
-        {error, _Reason} = Error -> Error;
-        {ok, #{'Id' := ContId}} ->
-            NodeState2 = NodeState#{
-                container_name => ContName,
-                container_id => ContId,
-                config_path => ConfigFilePath
-            },
-            {ok, NodeState2, TestCtx#{next_port := NextPort2}}
-    end.
+    #{'Id' := ContId} = aest_docker:create_container(ContName, DockerConfig),
+    NodeState2 = NodeState#{
+        container_name => ContName,
+        container_id => ContId,
+        config_path => ConfigFilePath
+    },
+    {ok, NodeState2, TestCtx#{next_port := NextPort2}}.
 
-delete_node(NodeState, TestCtx) ->
-    #{container_id := Id} = NodeState,
-    case aest_docker:delete_container(Id) of
-        {error, _Reason} = Error -> Error;
-        ok -> {ok, NodeState, TestCtx}
-    end.
+delete_node(#{container_id := ID} = NodeState, TestCtx) ->
+    aest_docker:delete_container(ID),
+    {ok, NodeState, TestCtx}.
 
-start_node(NodeState, TestCtx) ->
-    #{container_id := Id} = NodeState,
-    case aest_docker:start_container(Id) of
-        {error, _Reason} = Error -> Error;
-        ok ->
-            Info = aest_docker:inspect(Id),
-            {ok, NodeState#{ports => get_in(Info, ['NetworkSettings', 'Ports'])}, TestCtx}
-    end.
+start_node(#{container_id := ID, spec := Spec} = NodeState, TestCtx) ->
+    aest_docker:start_container(ID),
+    #{'Id' := ID} = Info = aest_docker:inspect(ID),
+    ct:log(info, "Container ~p [~s] started", [maps:get(name, Spec), ID]),
+    {ok, NodeState#{ports => get_in(Info, ['NetworkSettings', 'Ports'])}, TestCtx}.
 
-stop_node(NodeState, Timeout, TestCtx) ->
-    #{container_id := Id} = NodeState,
-    case aest_docker:stop_container(Id, Timeout) of
-        {error, _Reason} = Error -> Error;
-        ok -> {ok, NodeState, TestCtx}
-    end.
+stop_node(#{container_id := ID, spec := Spec} = NodeState, Timeout, TestCtx) ->
+    ct:log(info, "Container ~p [~s] stopped ", [maps:get(name, Spec), ID]),
+    aest_docker:stop_container(ID, Timeout),
+    {ok, NodeState, TestCtx}.
 
 %=== INTERNAL FUNCTIONS ========================================================
 

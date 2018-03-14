@@ -56,8 +56,8 @@ start_node(NodeName, Ctx) ->
     call(ctx2pid(Ctx), {start_node, NodeName}).
 
 wait_for_height(_MinHeight, _NodeNames, _Timeout, Ctx) ->
-    Nodes = call(ctx2pid(Ctx), get_nodes),
-    ct:log("~p~n", [Nodes]).
+    _Nodes = call(ctx2pid(Ctx), get_nodes),
+    ok.
 
 assert_synchronized(_NodeNames, _Ctx) ->
     ok.
@@ -67,15 +67,23 @@ assert_synchronized(_NodeNames, _Ctx) ->
 init([DataDir, TempDir]) ->
     mgr_setup(DataDir, TempDir).
 
-handle_call({setup_nodes, NodeSpecs}, _From, State) ->
+handle_call(Request, From, State) ->
+    try
+        handlex(Request, From, State)
+    catch
+        Class:Reason ->
+            {reply, {error, Class, Reason, erlang:get_stacktrace()}, State}
+    end.
+
+handlex({setup_nodes, NodeSpecs}, _From, State) ->
     call_reply(mgr_setup_nodes(NodeSpecs, State), State);
-handle_call({start_node, NodeName}, _From, State) ->
+handlex({start_node, NodeName}, _From, State) ->
     call_reply(mgr_start_node(NodeName, State), State);
-handle_call(get_nodes, _From, #{nodes := Nodes} = State) ->
+handlex(get_nodes, _From, #{nodes := Nodes} = State) ->
     {reply, Nodes, State};
-handle_call(cleanup, _From, State) ->
+handlex(cleanup, _From, State) ->
     call_reply(mgr_cleanup(State), State);
-handle_call(Request, From, _State) ->
+handlex(Request, From, _State) ->
     error({unknown_request, Request, From}).
 
 handle_info(_Msg, State) ->
@@ -105,13 +113,16 @@ stop(Pid) ->
     gen_server:stop(Pid).
 
 call(Pid, Msg) ->
-    gen_server:call(Pid, Msg, 60000).
+    case gen_server:call(Pid, Msg, 60000) of
+        {error, Class, Reason, _Stacktrace} ->
+            ct:fail({Class, Reason});
+        Reply ->
+            Reply
+    end.
 
 setup(DataDir, TempDir) ->
-    case aest_docker:start() of
-        ok -> start(DataDir, TempDir);
-        Error -> Error
-    end.
+    aest_docker:start(),
+    start(DataDir, TempDir).
 
 cleanup(Ctx) ->
     Pid = ctx2pid(Ctx),
@@ -138,19 +149,12 @@ mgr_setup(DataDir, TempDir) ->
                 data_dir => DataDir},
     {ok, #{ctx => TestCtx, nodes => #{}}}.
 
-mgr_cleanup(State0) ->
-    #{nodes := Nodes0} = State0,
-    State1 = maps:fold(fun(Name, NodeState, State) ->
+mgr_cleanup(#{nodes := Nodes0} = State0) ->
+    State1 = #{nodes := Nodes1} = maps:fold(fun(Name, NodeState, State) ->
         #{ctx := Ctx, nodes := Nodes} = State,
-        case aest_backend:stop_node(NodeState, ?STOP_TIMEOUT, Ctx) of
-            {error, _Reason} ->
-                %% Maybe we should log something ?
-                State;
-            {ok, NodeState1, Ctx1} ->
-                State#{ctx := Ctx1, nodes := Nodes#{Name := NodeState1}}
-        end
+        {ok, NodeState1, Ctx1} = aest_backend:stop_node(NodeState, ?STOP_TIMEOUT, Ctx),
+        State#{ctx := Ctx1, nodes := Nodes#{Name := NodeState1}}
     end, State0, Nodes0),
-    #{nodes := Nodes1} = State1,
     State2 = maps:fold(fun(Name, NodeState, State) ->
         #{ctx := Ctx, nodes := Nodes} = State,
         case aest_backend:delete_node(NodeState, Ctx) of

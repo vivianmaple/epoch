@@ -14,78 +14,42 @@
 %=== MACROS ====================================================================
 
 -define(BASE_URL, <<"http+unix://%2Fvar%2Frun%2Fdocker.sock/">>).
--define(DOCKER_INFO, [<<"info">>]).
--define(DOCKER_CONTAINERS_CREATE, [<<"containers/create">>]).
--define(DOCKER_CONTAINERS_DELETE(ID_OR_NAME), [<<"containers/">>, ID_OR_NAME]).
--define(DOCKER_CONTAINERS_START(ID_OR_NAME),
-        [<<"containers/">>, ID_OR_NAME, <<"/start">>]).
--define(DOCKER_CONTAINERS_STOP(ID_OR_NAME),
-        [<<"containers/">>, ID_OR_NAME, <<"/stop">>]).
-
--define(JSX_DECODE_OPTS, [{labels, attempt_atom}, return_maps]).
--define(JSX_ENCODE_OPTS, []).
 
 %=== API FUNCTIONS =============================================================
 
 start() ->
-    case application:ensure_all_started(hackney) of
-        {ok, _} -> ok;
-        Error -> Error
-    end.
+    {ok, _} = application:ensure_all_started(hackney),
+    ok.
 
 info() ->
-    case docker_get(?DOCKER_INFO) of
-        {error, _Reason} = Error -> Error;
-        {ok, 200, Response} -> {ok, Response};
-        {ok, Status, Response} ->
-            {error, {unexpected_status, Status, Response}}
-    end.
+    {ok, 200, Info} = docker_get([info]),
+    Info.
 
 create_container(Name, #{image := Image} = Config) ->
     BodyObj = maps:fold(fun create_body_object/3, #{}, Config),
-    case docker_post(?DOCKER_CONTAINERS_CREATE, #{name => Name}, BodyObj) of
-        {error, _Reason} = Error -> Error;
-        {ok, 409, _Response} -> {error, container_conflict};
-        {ok, 201, Response} -> {ok, Response};
-        {ok, Status, Response} ->
-            {error, {unexpected_status, Status, Response}}
+    case docker_post([containers, create], #{name => Name}, BodyObj) of
+        {ok, 201, Response} -> Response;
+        {ok, 404, _Response} -> error({no_such_image, Image})
     end.
 
-delete_container(NameOrId) ->
-    Path = ?DOCKER_CONTAINERS_DELETE(NameOrId),
-    case docker_delete(Path) of
-        {error, _Reason} = Error -> Error;
-        {ok, 404, _Response} -> {error, container_not_found};
-        {ok, 409, _Response} -> {error, container_conflict};
-        {ok, 204, _Response} -> ok;
-        {ok, Status, Response} ->
-            {error, {unexpected_status, Status, Response}}
+delete_container(ID) ->
+    {ok, 204, _} = docker_delete([containers, ID]),
+    ok.
+
+start_container(ID) ->
+    case docker_post([containers, ID, start]) of
+        {ok, 204, _} -> ok;
+        {ok, 304, _} -> error({container_already_started, ID})
     end.
 
-start_container(NameOrId) ->
-    Path = ?DOCKER_CONTAINERS_START(NameOrId),
-    case docker_post(Path) of
-        {error, _Reason} = Error -> Error;
-        {ok, 404, _Response} -> {error, container_not_found};
-        {ok, 304, _Response} -> {error, container_already_started};
-        {ok, 204, _Response} -> ok;
-        {ok, Status, Response} ->
-            {error, {unexpected_status, Status, Response}}
-    end.
-
-stop_container(NameOrId, Timeout) ->
-    Path = ?DOCKER_CONTAINERS_STOP(NameOrId),
-    case docker_post(Path, #{t => Timeout}) of
-        {error, _Reason} = Error -> Error;
-        {ok, 404, _Response} -> {error, container_not_found};
-        {ok, 304, _Response} -> {error, container_already_stopped};
-        {ok, 204, _Response} -> ok;
-        {ok, Status, Response} ->
-            {error, {unexpected_status, Status, Response}}
+stop_container(ID, Timeout) ->
+    case docker_post([containers, ID, stop], #{t => Timeout}) of
+        {ok, 204, _} -> ok;
+        {ok, 304, _} -> error({container_not_started, ID})
     end.
 
 inspect(ID) ->
-    {ok, 200, Info} = docker_get([<<"containers/">>, ID, <<"/json">>]),
+    {ok, 200, Info} = docker_get([containers, ID, json]),
     Info.
 
 %=== INTERNAL FUNCTIONS ========================================================
@@ -127,8 +91,7 @@ format(Fmt, Args) ->
     iolist_to_binary(io_lib:format(Fmt, Args)).
 
 docker_get(Path) ->
-    Url = hackney_url:make_url(?BASE_URL, Path, []),
-    case hackney:request(get, Url, [], <<>>, []) of
+    case hackney:request(get, url(Path), [], <<>>, []) of
         {error, _Reason} = Error -> Error;
         {ok, Status, _RespHeaders, ClientRef} ->
             case docker_fetch_json_body(ClientRef) of
@@ -138,8 +101,7 @@ docker_get(Path) ->
     end.
 
 docker_delete(Path) ->
-    Url = hackney_url:make_url(?BASE_URL, Path, []),
-    case hackney:request(delete, Url, [], <<>>, []) of
+    case hackney:request(delete, url(Path), [], <<>>, []) of
         {error, _Reason} = Error -> Error;
         {ok, Status, _RespHeaders, ClientRef} ->
             case docker_fetch_json_body(ClientRef) of
@@ -153,18 +115,14 @@ docker_post(Path) -> docker_post(Path, #{}).
 docker_post(Path, Query) -> docker_post(Path, Query, undefined).
 
 docker_post(Path, Query, BodyObj) ->
-    Url = hackney_url:make_url(?BASE_URL, Path, maps:to_list(Query)),
-    case encode(BodyObj) of
+    BodyJSON = encode(BodyObj),
+    Headers = [{<<"Content-Type">>, <<"application/json">>}],
+    case hackney:request(post, url(Path, Query), Headers, BodyJSON, []) of
         {error, _Reason} = Error -> Error;
-        {ok, BodyJson} ->
-            Headers = [{<<"Content-Type">>, <<"application/json">>}],
-            case hackney:request(post, Url, Headers, BodyJson, []) of
+        {ok, Status, _RespHeaders, ClientRef} ->
+            case docker_fetch_json_body(ClientRef) of
                 {error, _Reason} = Error -> Error;
-                {ok, Status, _RespHeaders, ClientRef} ->
-                    case docker_fetch_json_body(ClientRef) of
-                        {error, _Reason} = Error -> Error;
-                        {ok, Response} -> {ok, Status, Response}
-                    end
+                {ok, Response} -> {ok, Status, Response}
             end
     end.
 
@@ -176,20 +134,25 @@ docker_fetch_json_body(ClientRef) ->
 
 decode(<<>>) -> {ok, undefined};
 decode(JsonStr) ->
-    try jsx:decode(JsonStr, ?JSX_DECODE_OPTS) of
+    try jsx:decode(JsonStr, [{labels, attempt_atom}, return_maps]) of
         JsonObj -> {ok, JsonObj}
     catch
         error:badarg -> {error, bad_json}
     end.
 
-encode(undefined) -> {ok, <<>>};
-encode(JsonObj) ->
-    try jsx:encode(JsonObj, ?JSX_ENCODE_OPTS) of
-        JsonStr -> {ok, JsonStr}
-    catch
-        error:badarg -> {error, bad_json}
-    end.
+encode(undefined) -> <<>>;
+encode(JsonObj)   -> jsx:encode(JsonObj, []).
 
 json_string(Atom) when is_atom(Atom) -> Atom;
 json_string(Bin) when is_binary(Bin) -> Bin;
 json_string(Str) when is_list(Str) -> list_to_binary(Str).
+
+url(Path) -> url(Path, #{}).
+
+url(Path, QS) when is_list(Path) ->
+    hackney_url:make_url(?BASE_URL, [to_binary(P) || P <- Path], maps:to_list(QS));
+url(Item, QS) ->
+    url([Item], QS).
+
+to_binary(Term) when is_atom(Term) -> atom_to_binary(Term, utf8);
+to_binary(Term)                    -> Term.
