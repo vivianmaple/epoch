@@ -71,8 +71,8 @@ handle_call(Request, From, State) ->
     try
         handlex(Request, From, State)
     catch
-        Class:Reason ->
-            {reply, {error, Class, Reason, erlang:get_stacktrace()}, State}
+        throw:Reason ->
+            {reply, {'$error', Reason}, State}
     end.
 
 handlex({setup_nodes, NodeSpecs}, _From, State) ->
@@ -114,14 +114,14 @@ stop(Pid) ->
 
 call(Pid, Msg) ->
     case gen_server:call(Pid, Msg, 60000) of
-        {error, Class, Reason, _Stacktrace} ->
-            ct:fail({Class, Reason});
+        {'$error', Reason} ->
+            ct:fail({error, Reason});
         Reply ->
             Reply
     end.
 
 setup(DataDir, TempDir) ->
-    aest_docker:start(),
+    aest_docker_api:start(),
     start(DataDir, TempDir).
 
 cleanup(Ctx) ->
@@ -151,13 +151,14 @@ mgr_setup(DataDir, TempDir) ->
 
 mgr_cleanup(#{nodes := Nodes0} = State0) ->
     State1 = #{nodes := Nodes1} = maps:fold(fun(Name, NodeState, State) ->
+        #{spec := #{backend := Backend}} = NodeState,
         #{ctx := Ctx, nodes := Nodes} = State,
-        {ok, NodeState1, Ctx1} = aest_backend:stop_node(NodeState, ?STOP_TIMEOUT, Ctx),
+        {ok, NodeState1, Ctx1} = Backend:stop_node(NodeState, ?STOP_TIMEOUT, Ctx),
         State#{ctx := Ctx1, nodes := Nodes#{Name := NodeState1}}
     end, State0, Nodes0),
-    State2 = maps:fold(fun(Name, NodeState, State) ->
+    State2 = maps:fold(fun(Name, #{spec := #{backend := Backend}} = NodeState, State) ->
         #{ctx := Ctx, nodes := Nodes} = State,
-        case aest_backend:delete_node(NodeState, Ctx) of
+        case Backend:delete_node(NodeState, Ctx) of
             {error, _Reason} ->
                 %% Maybe we should log something ?
                 State;
@@ -172,16 +173,15 @@ mgr_setup_nodes(NodeSpecs, State) ->
     %% TODO: Add some validation of the specs
     %%  e.g. name clash, required keys...
     {PrepNodes, TestCtx2} = lists:foldl(
-        fun(#{name := Name} = Spec, {Acc, Ctx}) ->
-            {ok, NodeState, NewCtx} =
-                aest_backend:prepare_node(Spec, Ctx),
+        fun(#{name := Name, backend := Backend} = Spec, {Acc, Ctx}) ->
+            {ok, NodeState, NewCtx} = Backend:prepare_node(Spec, Ctx),
             {Acc#{Name => NodeState}, NewCtx}
         end, {#{}, TestCtx}, NodeSpecs),
     AllNodes = maps:merge(Nodes, PrepNodes),
     {Nodes2, TestCtx3} = maps:fold(
-        fun(Name, NodeState, {Acc, Ctx}) ->
+        fun(Name, #{spec := #{backend := Backend}} = NodeState, {Acc, Ctx}) ->
             {ok, NewNodeState, NewCtx} =
-                aest_backend:setup_node(NodeState, AllNodes, Ctx),
+                Backend:setup_node(NodeState, AllNodes, Ctx),
             {Acc#{Name => NewNodeState}, NewCtx}
         end, {Nodes, TestCtx2}, PrepNodes),
     {ok, State#{ctx := TestCtx3, nodes := Nodes2}}.
@@ -190,8 +190,8 @@ mgr_start_node(NodeName, State) ->
     #{ctx := TestCtx, nodes := Nodes} = State,
     case maps:find(NodeName, Nodes) of
         error -> {error, node_not_found};
-        {ok, NodeState} ->
-            case aest_backend:start_node(NodeState, TestCtx) of
+        {ok, #{spec := #{backend := Backend}} = NodeState} ->
+            case Backend:start_node(NodeState, TestCtx) of
                 {error, _Reason} = Error -> Error;
                 {ok, NodeState2, TestCtx2} ->
                     Nodes2 = Nodes#{NodeName := NodeState2},

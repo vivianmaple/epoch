@@ -21,21 +21,21 @@
 -define(NODE1, #{
     name    => node1,
     peers   => [node2],
-    backend => docker,
+    backend => aest_docker,
     source  => {pull, "aetrnty/epoch:v0.8.0"}
 }).
 
 -define(NODE2, #{
     name    => node2,
     peers   => [node1],
-    backend => docker,
+    backend => aest_docker,
     source => {pull, "aetrnty/epoch:v0.8.0"}
 }).
 
 -define(NODE3, #{
     name    => node3,
     peers   => [node1],
-    backend => docker,
+    backend => aest_docker,
     source  => {pull, "aetrnty/epoch:local"}
 }).
 

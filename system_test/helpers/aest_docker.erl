@@ -3,156 +3,85 @@
 %=== EXPORTS ===================================================================
 
 %% API exports
--export([start/0]).
--export([info/0]).
--export([create_container/2]).
--export([delete_container/1]).
--export([start_container/1]).
--export([stop_container/2]).
--export([inspect/1]).
+-export([prepare_node/2]).
+-export([setup_node/3]).
+-export([delete_node/2]).
+-export([start_node/2]).
+-export([stop_node/3]).
 
 %=== MACROS ====================================================================
 
--define(BASE_URL, <<"http+unix://%2Fvar%2Frun%2Fdocker.sock/">>).
+-define(CONFIG_FILE_TEMPLATE, "epoch.yaml.mustache").
+-define(EPOCH_CONFIG_FILE, "/home/epoch/epoch.yaml").
 
-%=== API FUNCTIONS =============================================================
+%=== GENERIC API FUNCTIONS =====================================================
 
-start() ->
-    {ok, _} = application:ensure_all_started(hackney),
-    ok.
+prepare_node(#{name := Name} = NodeSpec, TestCtx) ->
+    NodeState = #{
+        spec => NodeSpec,
+        hostname => Name,
+        ports => [3013, 3113, 3114]
+    },
+    {ok, NodeState, TestCtx}.
 
-info() ->
-    {ok, 200, Info} = docker_get([info]),
-    Info.
+setup_node(NodeState, NodeStates, TestCtx) ->
+    #{test_id := TestId,
+      next_port := NextPort,
+      data_dir := DataDir,
+      temp_dir := TempDir} = TestCtx,
+    #{spec := NodeSpec, hostname := Hostname, ports := Ports} = NodeState,
+    #{peers := PeerNames, source := {pull, Image}} = NodeSpec,
+    ConfigFileName = format("epoch_~s.yaml", [Hostname]),
+    ConfigFilePath = filename:join(TempDir, ConfigFileName),
+    TemplateFile = filename:join(DataDir, ?CONFIG_FILE_TEMPLATE),
+    ExpandedPeers = [maps:to_list(V)
+                     || {K, V} <- maps:to_list(NodeStates),
+                     lists:member(K, PeerNames)],
+    Context = [{epoch_config, maps:to_list(NodeState#{peers => ExpandedPeers})}],
+    ok = write_template(TemplateFile, ConfigFilePath, Context),
+    ContName = format("~s_~s", [Hostname, TestId]),
+    {NextPort2, PortMapping} = lists:foldl(fun(Port, {Next, Mapping}) ->
+        {Next + 1, [{tcp, Next, Port}|Mapping]}
+    end, {NextPort, []}, Ports),
+    DockerConfig = #{
+        hostname => ContName,
+        image => Image,
+        env => #{"EPOCH_CONFIG" => ?EPOCH_CONFIG_FILE},
+        volumes => [{ro, ConfigFilePath, ?EPOCH_CONFIG_FILE}],
+        ports => PortMapping
+    },
+    #{'Id' := ContId} = aest_docker_api:create_container(ContName, DockerConfig),
+    NodeState2 = NodeState#{
+        container_name => ContName,
+        container_id => ContId,
+        config_path => ConfigFilePath
+    },
+    {ok, NodeState2, TestCtx#{next_port := NextPort2}}.
 
-create_container(Name, #{image := Image} = Config) ->
-    BodyObj = maps:fold(fun create_body_object/3, #{}, Config),
-    case docker_post([containers, create], #{name => Name}, BodyObj) of
-        {ok, 201, Response} -> Response;
-        {ok, 404, _Response} -> error({no_such_image, Image})
-    end.
+delete_node(#{container_id := ID} = NodeState, TestCtx) ->
+    aest_docker_api:delete_container(ID),
+    {ok, NodeState, TestCtx}.
 
-delete_container(ID) ->
-    {ok, 204, _} = docker_delete([containers, ID]),
-    ok.
+start_node(#{container_id := ID, spec := Spec} = NodeState, TestCtx) ->
+    aest_docker_api:start_container(ID),
+    #{'Id' := ID} = Info = aest_docker_api:inspect(ID),
+    ct:log(info, "Container ~p [~s] started", [maps:get(name, Spec), ID]),
+    {ok, NodeState#{ports => get_in(Info, ['NetworkSettings', 'Ports'])}, TestCtx}.
 
-start_container(ID) ->
-    case docker_post([containers, ID, start]) of
-        {ok, 204, _} -> ok;
-        {ok, 304, _} -> error({container_already_started, ID})
-    end.
-
-stop_container(ID, Timeout) ->
-    case docker_post([containers, ID, stop], #{t => Timeout}) of
-        {ok, 204, _} -> ok;
-        {ok, 304, _} -> error({container_not_started, ID})
-    end.
-
-inspect(ID) ->
-    {ok, 200, Info} = docker_get([containers, ID, json]),
-    Info.
+stop_node(#{container_id := ID, spec := Spec} = NodeState, Timeout, TestCtx) ->
+    ct:log(info, "Container ~p [~s] stopped ", [maps:get(name, Spec), ID]),
+    aest_docker_api:stop_container(ID, Timeout),
+    {ok, NodeState, TestCtx}.
 
 %=== INTERNAL FUNCTIONS ========================================================
-
-create_body_object(hostname, Hostname, Body) ->
-    Body#{'Hostname' => json_string(Hostname)};
-create_body_object(image, Image, Body) ->
-    Body#{'Image' => json_string(Image)};
-create_body_object(env, Env, Body) ->
-    EnvList = [json_string(K ++ "=" ++ V) || {K, V} <- maps:to_list(Env)],
-    Body#{'Env' => EnvList};
-create_body_object(volumes, VolSpecs, Body) ->
-    {Volumes, Bindings} = lists:foldl(fun
-        ({rw, HostVol, NodeVol}, {VolAcc, BindAcc}) ->
-            {VolAcc#{json_string(NodeVol) => #{}},
-             [format("~s:~s", [HostVol, NodeVol]) | BindAcc]};
-        ({ro, HostVol, NodeVol}, {VolAcc, BindAcc}) ->
-            {VolAcc#{json_string(NodeVol) => #{}},
-             [format("~s:~s:ro", [HostVol, NodeVol]) | BindAcc]}
-    end, {#{}, []}, VolSpecs),
-    HostConfig = maps:get('HostConfig', Body, #{}),
-    HostConfig2 = HostConfig#{'Binds' => Bindings},
-    Body#{'HostConfig' => HostConfig2, 'Volumes' => Volumes};
-create_body_object(ports, PortSpecs, Body) ->
-    {Exposed, Bindings} = lists:foldl(fun
-        ({Proto, HostPort, ContainerPort}, {ExpAcc, BindAcc}) ->
-            Key = format("~w/~s", [ContainerPort, Proto]),
-            PortStr = format("~w", [HostPort]),
-            HostSpec = [#{'HostPort' => PortStr}],
-            {ExpAcc#{Key => #{}}, BindAcc#{Key => HostSpec}}
-    end, {#{}, #{}}, PortSpecs),
-    HostConfig = maps:get('HostConfig', Body, #{}),
-    HostConfig2 = HostConfig#{'PortBindings' => Bindings},
-    Body#{'HostConfig' => HostConfig2, 'ExposedPorts' => Exposed};
-create_body_object(Key, _Value, _Body) ->
-    error({unknown_create_param, Key}).
 
 format(Fmt, Args) ->
     iolist_to_binary(io_lib:format(Fmt, Args)).
 
-docker_get(Path) ->
-    case hackney:request(get, url(Path), [], <<>>, []) of
-        {error, _Reason} = Error -> Error;
-        {ok, Status, _RespHeaders, ClientRef} ->
-            case docker_fetch_json_body(ClientRef) of
-                {error, _Reason} = Error -> Error;
-                {ok, Response} -> {ok, Status, Response}
-            end
-    end.
+write_template(TemplateFile, OutputFile, Context) ->
+    Template = bbmustache:parse_file(TemplateFile),
+    Data = bbmustache:compile(Template, Context, [{key_type, atom}]),
+    file:write_file(OutputFile, Data).
 
-docker_delete(Path) ->
-    case hackney:request(delete, url(Path), [], <<>>, []) of
-        {error, _Reason} = Error -> Error;
-        {ok, Status, _RespHeaders, ClientRef} ->
-            case docker_fetch_json_body(ClientRef) of
-                {error, _Reason} = Error -> Error;
-                {ok, Response} -> {ok, Status, Response}
-            end
-    end.
-
-docker_post(Path) -> docker_post(Path, #{}).
-
-docker_post(Path, Query) -> docker_post(Path, Query, undefined).
-
-docker_post(Path, Query, BodyObj) ->
-    BodyJSON = encode(BodyObj),
-    Headers = [{<<"Content-Type">>, <<"application/json">>}],
-    case hackney:request(post, url(Path, Query), Headers, BodyJSON, []) of
-        {error, _Reason} = Error -> Error;
-        {ok, Status, _RespHeaders, ClientRef} ->
-            case docker_fetch_json_body(ClientRef) of
-                {error, _Reason} = Error -> Error;
-                {ok, Response} -> {ok, Status, Response}
-            end
-    end.
-
-docker_fetch_json_body(ClientRef) ->
-    case hackney:body(ClientRef) of
-        {error, _Reason} = Error -> Error;
-        {ok, BodyJson} -> decode(BodyJson)
-    end.
-
-decode(<<>>) -> {ok, undefined};
-decode(JsonStr) ->
-    try jsx:decode(JsonStr, [{labels, attempt_atom}, return_maps]) of
-        JsonObj -> {ok, JsonObj}
-    catch
-        error:badarg -> {error, bad_json}
-    end.
-
-encode(undefined) -> <<>>;
-encode(JsonObj)   -> jsx:encode(JsonObj, []).
-
-json_string(Atom) when is_atom(Atom) -> Atom;
-json_string(Bin) when is_binary(Bin) -> Bin;
-json_string(Str) when is_list(Str) -> list_to_binary(Str).
-
-url(Path) -> url(Path, #{}).
-
-url(Path, QS) when is_list(Path) ->
-    hackney_url:make_url(?BASE_URL, [to_binary(P) || P <- Path], maps:to_list(QS));
-url(Item, QS) ->
-    url([Item], QS).
-
-to_binary(Term) when is_atom(Term) -> atom_to_binary(Term, utf8);
-to_binary(Term)                    -> Term.
+get_in(Map, [Key])      -> maps:get(Key, Map);
+get_in(Map, [Key|Keys]) -> get_in(maps:get(Key, Map), Keys).
