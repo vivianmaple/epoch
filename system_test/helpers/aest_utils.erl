@@ -27,13 +27,16 @@
 
 -define(TEST_CTX_FIRST_LOCAL_PORT, 3001).
 
--define(STOP_TIMEOUT, 3). % In seconds
+-define(STOP_TIMEOUT, 30). % In seconds
 
 %=== COMMON TEST API FUNCTIONS =================================================
 
 ct_setup(Config) ->
     {data_dir, DataDir} = proplists:lookup(data_dir, Config),
     {priv_dir, PrivDir} = proplists:lookup(priv_dir, Config),
+    ct:log("Node logs can be found here: ~n<a href=\"file://~s\">~s</a>",
+        [PrivDir, PrivDir]
+    ),
     case setup(DataDir, PrivDir) of
         {ok, Pid} -> [{?CT_CONF_KEY, Pid} | Config];
         {error, Reason} ->
