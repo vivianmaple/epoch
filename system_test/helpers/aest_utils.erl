@@ -19,6 +19,7 @@
 -export([handle_call/3]).
 -export([handle_cast/2]).
 -export([handle_info/2]).
+-export([terminate/2]).
 
 %=== MACROS ====================================================================
 
@@ -44,11 +45,10 @@ ct_setup(Config) ->
     end.
 
 ct_cleanup(Config) ->
-    case cleanup(Config) of
-        ok -> ok;
-        {error, Reason} ->
-            erlang:error({system_test_cleanup_failed, [{reason, Reason}]})
-    end.
+    Pid = ctx2pid(Config),
+    call(Pid, cleanup),
+    call(Pid, stop),
+    wait_for_exit(Pid, 120000).
 
 %=== GENERIC API FUNCTIONS =====================================================
 
@@ -68,6 +68,7 @@ assert_synchronized(_NodeNames, _Ctx) ->
 %=== BEHAVIOUR GEN_SERVER CALLBACK FUNCTIONS ===================================
 
 init([DataDir, TempDir]) ->
+    process_flag(trap_exit, true), % Make sure terminate always cleans up
     mgr_setup(DataDir, TempDir).
 
 handle_call(Request, From, State) ->
@@ -79,13 +80,15 @@ handle_call(Request, From, State) ->
     end.
 
 handlex({setup_nodes, NodeSpecs}, _From, State) ->
-    call_reply(mgr_setup_nodes(NodeSpecs, State), State);
+    {reply, ok, mgr_setup_nodes(NodeSpecs, State)};
 handlex({start_node, NodeName}, _From, State) ->
-    call_reply(mgr_start_node(NodeName, State), State);
+    {reply, ok, mgr_start_node(NodeName, State)};
 handlex(get_nodes, _From, #{nodes := Nodes} = State) ->
     {reply, Nodes, State};
 handlex(cleanup, _From, State) ->
-    call_reply(mgr_cleanup(State), State);
+    {reply, ok, mgr_cleanup(State)};
+handlex(stop, _From, State) ->
+    {stop, normal, ok, State};
 handlex(Request, From, _State) ->
     error({unknown_request, Request, From}).
 
@@ -94,6 +97,8 @@ handle_info(_Msg, State) ->
 
 handle_cast(_Msg, State) ->
     {noreply, State}.
+
+terminate(_Reason, State) -> mgr_cleanup(State).
 
 %=== INTERNAL FUNCTIONS ========================================================
 
@@ -110,10 +115,7 @@ ctx2pid(Props) when is_list(Props) ->
     end.
 
 start(DataDir, TempDir) ->
-    gen_server:start(?MODULE, [DataDir, TempDir], []).
-
-stop(Pid) ->
-    gen_server:stop(Pid).
+    gen_server:start_link(?MODULE, [DataDir, TempDir], []).
 
 call(Pid, Msg) ->
     case gen_server:call(Pid, Msg, ?STOP_TIMEOUT * 1000 * 2) of
@@ -127,20 +129,11 @@ setup(DataDir, TempDir) ->
     aest_docker_api:start(),
     start(DataDir, TempDir).
 
-cleanup(Ctx) ->
-    Pid = ctx2pid(Ctx),
-    Result = call(Pid, cleanup),
-    stop(Pid),
-    Result.
-
-call_reply(ok, OldState) ->
-    {reply, ok, OldState};
-call_reply({ok, NewState}, _OldState) ->
-    {reply, ok, NewState};
-call_reply({ok, Result, NewState}, _OldState) ->
-    {reply, {ok, Result}, NewState};
-call_reply(Error, OldState) ->
-    {reply, Error, OldState}.
+wait_for_exit(Pid, Timeout) ->
+    Ref = erlang:monitor(process, Pid),
+    receive {'DOWN', Ref, process, Pid, _Reason} -> ok
+    after Timeout -> error({process_not_stopped, Pid})
+    end.
 
 %--- NODE MANAGER PROCESS FUNCTION ---------------------------------------------
 
@@ -154,22 +147,16 @@ mgr_setup(DataDir, TempDir) ->
 
 mgr_cleanup(#{nodes := Nodes0} = State0) ->
     State1 = #{nodes := Nodes1} = maps:fold(fun(Name, NodeState, State) ->
-        #{spec := #{backend := Backend}} = NodeState,
+        #{spec := #{backend := Backend, name := Name}} = NodeState,
         #{ctx := Ctx, nodes := Nodes} = State,
         {ok, NodeState1, Ctx1} = Backend:stop_node(NodeState, ?STOP_TIMEOUT, Ctx),
         State#{ctx := Ctx1, nodes := Nodes#{Name := NodeState1}}
     end, State0, Nodes0),
-    State2 = maps:fold(fun(Name, #{spec := #{backend := Backend}} = NodeState, State) ->
+    maps:fold(fun(Name, #{spec := #{backend := Backend}} = NodeState, State) ->
         #{ctx := Ctx, nodes := Nodes} = State,
-        case Backend:delete_node(NodeState, Ctx) of
-            {error, _Reason} ->
-                %% Maybe we should log something ?
-                State;
-            {ok, NodeState1, Ctx1} ->
-                State#{ctx := Ctx1, nodes := Nodes#{Name := NodeState1}}
-        end
-    end, State1, Nodes1),
-    {ok, State2}.
+        {ok, _NodeState1, Ctx1} = Backend:delete_node(NodeState, Ctx),
+        State#{ctx := Ctx1, nodes := maps:remove(Name, Nodes)}
+    end, State1, Nodes1).
 
 mgr_setup_nodes(NodeSpecs, State) ->
     #{ctx := TestCtx, nodes := Nodes} = State,
@@ -187,17 +174,11 @@ mgr_setup_nodes(NodeSpecs, State) ->
                 Backend:setup_node(NodeState, AllNodes, Ctx),
             {Acc#{Name => NewNodeState}, NewCtx}
         end, {Nodes, TestCtx2}, PrepNodes),
-    {ok, State#{ctx := TestCtx3, nodes := Nodes2}}.
+    State#{ctx := TestCtx3, nodes := Nodes2}.
 
 mgr_start_node(NodeName, State) ->
     #{ctx := TestCtx, nodes := Nodes} = State,
-    case maps:find(NodeName, Nodes) of
-        error -> {error, node_not_found};
-        {ok, #{spec := #{backend := Backend}} = NodeState} ->
-            case Backend:start_node(NodeState, TestCtx) of
-                {error, _Reason} = Error -> Error;
-                {ok, NodeState2, TestCtx2} ->
-                    Nodes2 = Nodes#{NodeName := NodeState2},
-                    {ok, State#{ctx := TestCtx2, nodes := Nodes2}}
-            end
-    end.
+    #{spec := #{backend := Backend}} = NodeState = maps:get(NodeName, Nodes),
+    {ok, NodeState2, TestCtx2} = Backend:start_node(NodeState, TestCtx),
+    Nodes2 = Nodes#{NodeName := NodeState2},
+    State#{ctx := TestCtx2, nodes := Nodes2}.
