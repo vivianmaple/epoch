@@ -35,10 +35,9 @@ setup_node(NodeState, NodeStates, TestCtx) ->
     ConfigFileName = format("epoch_~s.yaml", [Hostname]),
     ConfigFilePath = filename:join([TempDir, "config", ConfigFileName]),
     TemplateFile = filename:join(DataDir, ?CONFIG_FILE_TEMPLATE),
-    ExpandedPeers = [maps:to_list(V)
-                     || {K, V} <- maps:to_list(NodeStates),
+    ExpandedPeers = [V || {K, V} <- maps:to_list(NodeStates),
                      lists:member(K, PeerNames)],
-    Context = [{epoch_config, maps:to_list(NodeState#{peers => ExpandedPeers})}],
+    Context = #{epoch_config => NodeState#{peers => ExpandedPeers}},
     ok = write_template(TemplateFile, ConfigFilePath, Context),
     ContName = format("~s_~s", [Hostname, TestId]),
     LogPath = filename:join(TempDir, format("~s_logs", [Name])),
