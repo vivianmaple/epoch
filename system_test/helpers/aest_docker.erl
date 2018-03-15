@@ -13,6 +13,7 @@
 
 -define(CONFIG_FILE_TEMPLATE, "epoch.yaml.mustache").
 -define(EPOCH_CONFIG_FILE, "/home/epoch/epoch.yaml").
+-define(EPOCH_LOG_FOLDER, "/home/epoch/node/log").
 
 %=== GENERIC API FUNCTIONS =====================================================
 
@@ -30,9 +31,9 @@ setup_node(NodeState, NodeStates, TestCtx) ->
       data_dir := DataDir,
       temp_dir := TempDir} = TestCtx,
     #{spec := NodeSpec, hostname := Hostname, ports := Ports} = NodeState,
-    #{peers := PeerNames, source := {pull, Image}} = NodeSpec,
+    #{name := Name, peers := PeerNames, source := {pull, Image}} = NodeSpec,
     ConfigFileName = format("epoch_~s.yaml", [Hostname]),
-    ConfigFilePath = filename:join(TempDir, ConfigFileName),
+    ConfigFilePath = filename:join([TempDir, "config", ConfigFileName]),
     TemplateFile = filename:join(DataDir, ?CONFIG_FILE_TEMPLATE),
     ExpandedPeers = [maps:to_list(V)
                      || {K, V} <- maps:to_list(NodeStates),
@@ -40,6 +41,7 @@ setup_node(NodeState, NodeStates, TestCtx) ->
     Context = [{epoch_config, maps:to_list(NodeState#{peers => ExpandedPeers})}],
     ok = write_template(TemplateFile, ConfigFilePath, Context),
     ContName = format("~s_~s", [Hostname, TestId]),
+    LogPath = filename:join(TempDir, format("~s_logs", [Name])),
     {NextPort2, PortMapping} = lists:foldl(fun(Port, {Next, Mapping}) ->
         {Next + 1, [{tcp, Next, Port}|Mapping]}
     end, {NextPort, []}, Ports),
@@ -47,7 +49,10 @@ setup_node(NodeState, NodeStates, TestCtx) ->
         hostname => ContName,
         image => Image,
         env => #{"EPOCH_CONFIG" => ?EPOCH_CONFIG_FILE},
-        volumes => [{ro, ConfigFilePath, ?EPOCH_CONFIG_FILE}],
+        volumes => [
+            {ro, ConfigFilePath, ?EPOCH_CONFIG_FILE},
+            {rw, LogPath, ?EPOCH_LOG_FOLDER}
+        ],
         ports => PortMapping
     },
     #{'Id' := ContId} = aest_docker_api:create_container(ContName, DockerConfig),
@@ -81,6 +86,7 @@ format(Fmt, Args) ->
 write_template(TemplateFile, OutputFile, Context) ->
     Template = bbmustache:parse_file(TemplateFile),
     Data = bbmustache:compile(Template, Context, [{key_type, atom}]),
+    ok = filelib:ensure_dir(OutputFile),
     file:write_file(OutputFile, Data).
 
 get_in(Map, [Key])      -> maps:get(Key, Map);
