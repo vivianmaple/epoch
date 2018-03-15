@@ -62,8 +62,9 @@ setup_node(NodeState, NodeStates, TestCtx) ->
     },
     {ok, NodeState2, TestCtx#{next_port := NextPort2}}.
 
-delete_node(#{container_id := ID} = NodeState, TestCtx) ->
+delete_node(#{container_id := ID, spec := Spec} = NodeState, TestCtx) ->
     aest_docker_api:delete_container(ID),
+    ct:log(info, "Container ~p [~s] deleted", [maps:get(name, Spec), ID]),
     {ok, NodeState, TestCtx}.
 
 start_node(#{container_id := ID, spec := Spec} = NodeState, TestCtx) ->
