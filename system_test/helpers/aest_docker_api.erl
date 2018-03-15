@@ -43,9 +43,10 @@ start_container(ID) ->
     end.
 
 stop_container(ID, Timeout) ->
-    case docker_post([containers, ID, stop], #{t => Timeout}) of
-        {ok, 204, _} -> ok;
-        {ok, 304, _} -> throw({container_not_started, ID})
+    case docker_post([containers, ID, stop], #{t => Timeout}, undefined, Timeout * 1000) of
+        {ok, 204, _}     -> ok;
+        {ok, 304, _}     -> throw({container_not_started, ID});
+        {error, timeout} -> throw({container_stop_timeout, ID})
     end.
 
 inspect(ID) ->
@@ -114,10 +115,12 @@ docker_post(Path) -> docker_post(Path, #{}).
 
 docker_post(Path, Query) -> docker_post(Path, Query, undefined).
 
-docker_post(Path, Query, BodyObj) ->
+docker_post(Path, Query, BodyObj) -> docker_post(Path, Query, BodyObj, 5000).
+
+docker_post(Path, Query, BodyObj, Timeout) ->
     BodyJSON = encode(BodyObj),
     Headers = [{<<"Content-Type">>, <<"application/json">>}],
-    case hackney:request(post, url(Path, Query), Headers, BodyJSON, []) of
+    case hackney:request(post, url(Path, Query), Headers, BodyJSON, [{recv_timeout, Timeout}]) of
         {error, _Reason} = Error -> Error;
         {ok, Status, _RespHeaders, ClientRef} ->
             case docker_fetch_json_body(ClientRef) of

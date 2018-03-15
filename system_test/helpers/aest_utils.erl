@@ -113,7 +113,7 @@ stop(Pid) ->
     gen_server:stop(Pid).
 
 call(Pid, Msg) ->
-    case gen_server:call(Pid, Msg, 60000) of
+    case gen_server:call(Pid, Msg, ?STOP_TIMEOUT * 1000 * 2) of
         {'$error', Reason} ->
             ct:fail({error, Reason});
         Reply ->
