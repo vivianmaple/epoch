@@ -3,47 +3,135 @@
 %=== EXPORTS ===================================================================
 
 %% API exports
--export([prepare_node/2]).
--export([setup_node/3]).
--export([delete_node/2]).
--export([start_node/2]).
--export([stop_node/3]).
+-export([start/1]).
+-export([stop/1]).
+-export([setup_node/2]).
+-export([delete_node/1]).
+-export([start_node/1]).
+-export([stop_node/1, stop_node/2]).
 
 %=== MACROS ====================================================================
 
 -define(CONFIG_FILE_TEMPLATE, "epoch.yaml.mustache").
 -define(EPOCH_CONFIG_FILE, "/home/epoch/epoch.yaml").
 -define(EPOCH_LOG_FOLDER, "/home/epoch/node/log").
+-define(EXT_HTTP_PORT, 3013).
+-define(INT_HTTP_PORT, 3113).
+-define(INT_WS_PORT, 3114).
+
+%=== TYPES =====================================================================
+
+-type log_fun() :: fun((io:format(), list()) -> ok) | undefined.
+-type test_uid() :: binary() | undefined.
+-type service_label() :: ext_http | int_http | int_ws.
+
+%% State of the docker backend
+-type backend_state() :: #{
+    postfix := binary(),        % A unique postfix to add to container names.
+    log_fun := log_fun(),       % Function to use for logging.
+    data_dir := binary(),       % The directory where the templates can be found.
+    temp_dir := binary()        % A temporary directory that can be used to generate
+                                % configuration files and save the log files.
+}.
+
+%% Node specification
+-type node_spec() :: #{
+    name := atom(),
+    % Names or URLs of the peer nodes
+    peers := [atom() | binary()],
+    source := {pull, binary()}  % Source of the node image
+}.
+
+
+%% State of a node
+-type node_state() :: #{
+    spec := map(),              % Backup of the spec used when adding the node
+    log_fun := log_fun(),        % Function to use for logging
+    hostname := atom(),         % Hostname of the container running the node
+    exposed_ports := #{service_label() => pos_integer()},
+    local_ports := #{service_label() => pos_integer()}
+}.
+
 
 %=== GENERIC API FUNCTIONS =====================================================
 
-prepare_node(#{name := Name} = NodeSpec, TestCtx) ->
-    NodeState = #{
-        spec => NodeSpec,
-        hostname => Name,
-        ports => [3013, 3113, 3114]
-    },
-    {ok, NodeState, TestCtx}.
+%% @doc Start the docker
+-spec start(Options) -> State
+    when Options :: #{test_id => test_uid(),
+                      log_fun => log_fun(),
+                      data_dir := binary(),
+                      temp_dir := binary()},
+         State :: backend_state().
 
-setup_node(NodeState, NodeStates, TestCtx) ->
-    #{test_id := TestId,
-      next_port := NextPort,
+start(Options) ->
+    TestId = maps:get(test_id, Options),
+    Postfix = uid2postfix(TestId),
+    LogFun = maps:get(log_fun, Options),
+    {ok, DataDir} = maps:find(data_dir, Options),
+    {ok, TempDir} = maps:find(temp_dir, Options),
+    ok = aest_docker_api:start(),
+    #{postfix => Postfix,
+      log_fun => LogFun,
+      data_dir => DataDir,
+      temp_dir => TempDir
+    }.
+
+
+-spec stop(BackendState) -> ok
+    when BackendState :: backend_state().
+
+stop(_BackendState) -> ok.
+
+
+-spec setup_node(Spec, BackendState) -> NodeState
+    when Spec :: node_spec(),
+         BackendState :: backend_state(),
+         NodeState :: node_state().
+
+setup_node(Spec, BackendState) ->
+    #{log_fun := LogFun,
+      postfix := Postfix,
       data_dir := DataDir,
-      temp_dir := TempDir} = TestCtx,
-    #{spec := NodeSpec, hostname := Hostname, ports := Ports} = NodeState,
-    #{name := Name, peers := PeerNames, source := {pull, Image}} = NodeSpec,
-    ConfigFileName = format("epoch_~s.yaml", [Hostname]),
+      temp_dir := TempDir} = BackendState,
+    #{name := Name,
+      peers := Peers,
+      source := {pull, Image}} = Spec,
+
+    ExtAddr = format("http://~s:~w/", [Name, ?EXT_HTTP_PORT]),
+    ExposedPorts = #{
+        ext_http => ?EXT_HTTP_PORT,
+        int_http => ?INT_HTTP_PORT,
+        int_ws => ?INT_WS_PORT
+    },
+    LocalPorts = allocate_ports([ext_http, int_http, int_ws]),
+    NodeState = #{
+        spec => spec,
+        log_fun => LogFun,
+        hostname => Name,
+        exposed_ports => ExposedPorts,
+        local_ports => LocalPorts
+    },
+
+    ConfigFileName = format("epoch_~s.yaml", [Name]),
     ConfigFilePath = filename:join([TempDir, "config", ConfigFileName]),
     TemplateFile = filename:join(DataDir, ?CONFIG_FILE_TEMPLATE),
-    ExpandedPeers = [V || {K, V} <- maps:to_list(NodeStates),
-                     lists:member(K, PeerNames)],
-    Context = #{epoch_config => NodeState#{peers => ExpandedPeers}},
+    PeerVars = lists:map(fun
+        (PeerName) when is_atom(PeerName) ->
+            #{ext_addr => format("http://~s:~w/", [PeerName, ?EXT_HTTP_PORT])};
+        (PeerUrl) when is_binary(PeerUrl) ->
+            #{ext_addr => PeerUrl}
+    end, Peers),
+    Context = #{epoch_config => #{
+        hostname => Name,
+        ext_addr => ExtAddr,
+        peers => PeerVars
+    }},
     ok = write_template(TemplateFile, ConfigFilePath, Context),
-    ContName = format("~s_~s", [Hostname, TestId]),
+    ContName = format("~s~s", [Name, Postfix]),
     LogPath = filename:join(TempDir, format("~s_logs", [Name])),
-    {NextPort2, PortMapping} = lists:foldl(fun(Port, {Next, Mapping}) ->
-        {Next + 1, [{tcp, Next, Port}|Mapping]}
-    end, {NextPort, []}, Ports),
+    PortMapping = maps:fold(fun(Label, Port, Acc) ->
+        [{tcp, maps:get(Label, LocalPorts), Port} | Acc]
+    end, [], ExposedPorts),
     DockerConfig = #{
         hostname => ContName,
         image => Image,
@@ -55,30 +143,70 @@ setup_node(NodeState, NodeStates, TestCtx) ->
         ports => PortMapping
     },
     #{'Id' := ContId} = aest_docker_api:create_container(ContName, DockerConfig),
-    NodeState2 = NodeState#{
+    NodeState#{
         container_name => ContName,
         container_id => ContId,
         config_path => ConfigFilePath
-    },
-    {ok, NodeState2, TestCtx#{next_port := NextPort2}}.
+    }.
 
-delete_node(#{container_id := ID, spec := Spec} = NodeState, TestCtx) ->
+
+-spec delete_node(NodeState) -> ok
+    when NodeState :: node_state().
+
+delete_node(#{container_id := ID, hostname := Name} = NodeState) ->
     aest_docker_api:delete_container(ID),
-    ct:log(info, "Container ~p [~s] deleted", [maps:get(name, Spec), ID]),
-    {ok, NodeState, TestCtx}.
+    log(NodeState, "Container ~p [~s] deleted", [Name, ID]),
+    ok.
 
-start_node(#{container_id := ID, spec := Spec} = NodeState, TestCtx) ->
+
+-spec start_node(NodeState) -> NodeState
+    when NodeState :: node_state().
+
+start_node(#{container_id := ID, hostname := Name} = NodeState) ->
     aest_docker_api:start_container(ID),
-    #{'Id' := ID} = Info = aest_docker_api:inspect(ID),
-    ct:log(info, "Container ~p [~s] started", [maps:get(name, Spec), ID]),
-    {ok, NodeState#{ports => get_in(Info, ['NetworkSettings', 'Ports'])}, TestCtx}.
+    log(NodeState, "Container ~p [~s] started", [Name, ID]),
+    NodeState.
 
-stop_node(#{container_id := ID, spec := Spec} = NodeState, Timeout, TestCtx) ->
-    ct:log(info, "Container ~p [~s] stopped ", [maps:get(name, Spec), ID]),
-    aest_docker_api:stop_container(ID, Timeout),
-    {ok, NodeState, TestCtx}.
+
+-spec stop_node(NodeState) -> NodeState
+    when NodeState :: node_state().
+
+stop_node(NodeState) -> stop_node(NodeState, #{}).
+
+
+-spec stop_node(NodeState, Options) -> NodeState
+    when NodeState :: node_state(),
+         Options :: #{
+            soft_timeout => pos_integer(),
+            hard_timeout => pos_integer()
+         }.
+
+stop_node(#{container_id := ID, hostname := Name} = NodeState, Opts) ->
+    aest_docker_api:stop_container(ID, Opts),
+    log(NodeState, "Container ~p [~s] stopped ", [Name, ID]),
+    NodeState.
 
 %=== INTERNAL FUNCTIONS ========================================================
+
+log(#{log_fun := undefined}, _Fmt, _Args) -> ok;
+log(#{log_fun := LogFun}, Fmt, Args) -> LogFun(Fmt, Args).
+
+uid2postfix(undefined) -> <<>>;
+uid2postfix(<<>>) -> <<>>;
+uid2postfix(Uid) -> <<"_", Uid/binary>>.
+
+free_port() ->
+    {ok, Socket} = gen_tcp:listen(0, [{reuseaddr, true}]),
+    {ok, Port} = inet:port(Socket),
+    gen_tcp:close(Socket),
+    Port.
+
+allocate_ports(Labels) -> allocate_ports(Labels, #{}).
+
+allocate_ports([], Acc) -> Acc;
+allocate_ports([Label | Labels], Acc) ->
+    allocate_ports(Labels, Acc#{Label => free_port()}).
+
 
 format(Fmt, Args) ->
     iolist_to_binary(io_lib:format(Fmt, Args)).
@@ -88,6 +216,3 @@ write_template(TemplateFile, OutputFile, Context) ->
     Data = bbmustache:compile(Template, Context, [{key_type, atom}]),
     ok = filelib:ensure_dir(OutputFile),
     file:write_file(OutputFile, Data).
-
-get_in(Map, [Key])      -> maps:get(Key, Map);
-get_in(Map, [Key|Keys]) -> get_in(maps:get(Key, Map), Keys).

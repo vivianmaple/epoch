@@ -10,7 +10,7 @@
 % Test cases
 -export([new_node_join_old_network/1]).
 
--import(aest_utils, [
+-import(aest_nodes, [
     setup_nodes/2,
     start_node/2,
     wait_for_height/4,
@@ -48,10 +48,10 @@ all() ->
     [new_node_join_old_network].
 
 init_per_testcase(_TC, Config) ->
-    aest_utils:ct_setup(Config).
+    aest_nodes:ct_setup(Config).
 
 end_per_testcase(_TC, Config) ->
-    aest_utils:ct_cleanup(Config).
+    aest_nodes:ct_cleanup(Config).
 
 %=== TEST CASES ================================================================
 

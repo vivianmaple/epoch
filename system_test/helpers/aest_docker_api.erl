@@ -14,6 +14,8 @@
 %=== MACROS ====================================================================
 
 -define(BASE_URL, <<"http+unix://%2Fvar%2Frun%2Fdocker.sock/">>).
+-define(CONTAINER_STOP_TIMEOUT, 30).
+-define(CONTAINER_KILL_TIMEOUT_EXTRA, 5).
 
 %=== API FUNCTIONS =============================================================
 
@@ -29,24 +31,38 @@ create_container(Name, #{image := Image} = Config) ->
     BodyObj = maps:fold(fun create_body_object/3, #{}, Config),
     case docker_post([containers, create], #{name => Name}, BodyObj) of
         {ok, 201, Response} -> Response;
-        {ok, 404, _Response} -> throw({no_such_image, Image})
+        {ok, 404, _Response} -> throw({no_such_image, Image});
+        {ok, 500, Response} ->
+            throw({docker_error, maps:get(message, Response)})
     end.
 
 delete_container(ID) ->
-    {ok, 204, _} = docker_delete([containers, ID]),
-    ok.
+    case docker_delete([containers, ID]) of
+        {ok, 204, _} -> ok;
+        {ok, 500, Response} ->
+            throw({docker_error, maps:get(message, Response)})
+    end.
 
 start_container(ID) ->
     case docker_post([containers, ID, start]) of
         {ok, 204, _} -> ok;
-        {ok, 304, _} -> throw({container_already_started, ID})
+        {ok, 304, _} -> throw({container_already_started, ID});
+        {ok, 500, Response} ->
+            throw({docker_error, maps:get(message, Response)})
     end.
 
-stop_container(ID, Timeout) ->
-    case docker_post([containers, ID, stop], #{t => Timeout}, undefined, Timeout * 1000) of
-        {ok, 204, _}     -> ok;
-        {ok, 304, _}     -> throw({container_not_started, ID});
-        {error, timeout} -> throw({container_stop_timeout, ID})
+stop_container(ID, Opts) ->
+    SoftTimeout = maps:get(soft_timeout, Opts, ?CONTAINER_STOP_TIMEOUT),
+    HardTimeout = maps:get(hard_timeout, Opts,
+                           SoftTimeout + ?CONTAINER_KILL_TIMEOUT_EXTRA),
+    case docker_post([containers, ID, stop], #{t => SoftTimeout},
+                     undefined, HardTimeout * 1000) of
+        {ok, 204, _} -> ok;
+        {ok, 304, _} -> throw({container_not_started, ID});
+        {ok, 500, Response} ->
+            throw({docker_error, maps:get(message, Response)});
+        {error, timeout} ->
+            throw({container_stop_timeout, ID})
     end.
 
 inspect(ID) ->
