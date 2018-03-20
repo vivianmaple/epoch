@@ -181,7 +181,6 @@ mgr_cleanup(State) ->
     State2 = mgr_safe_stop_all(?NODE_TEARDOWN_TIMEOUT, State),
     State3 = mgr_safe_delete_all(State2),
     mgr_safe_stop_backends(State3).
-    State.
 
 mgr_setup_nodes(NodeSpecs, State) ->
     lists:foldl(fun mgr_setup_node/2, State, NodeSpecs).
@@ -209,7 +208,7 @@ mgr_safe_stop_backends(#{backends := Backends} = State) ->
             Mod:stop(BackendState)
         catch
             _:E ->
-                log(State, "Error while stopping backend ~p: ~p~n", [Mod, E])
+                log(State, "Error while stopping backend ~p: ~p", [Mod, E])
         end
     end, Backends),
     State#{backends := #{}}.
@@ -222,7 +221,7 @@ mgr_safe_stop_all(Timeout, #{nodes := Nodes1} = State) ->
             {Backend, Backend:stop_node(NodeState, Opts)}
         catch
             _:E ->
-                log(State, "Error while stopping node ~p: ~p~n", [Name, E]),
+                log(State, "Error while stopping node ~p: ~p", [Name, E]),
                 {Backend, NodeState}
         end
     end, Nodes1),
@@ -234,7 +233,7 @@ mgr_safe_delete_all(#{nodes := Nodes1} = State) ->
             {Backend, Backend:delete_node(NodeState)}
         catch
             _:E ->
-                log(State, "Error while stopping node ~p: ~p~n", [Name, E]),
+                log(State, "Error while stopping node ~p: ~p", [Name, E]),
                 {Backend, NodeState}
         end
     end, Nodes1),

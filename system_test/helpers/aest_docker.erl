@@ -30,8 +30,9 @@
     postfix := binary(),        % A unique postfix to add to container names.
     log_fun := log_fun(),       % Function to use for logging.
     data_dir := binary(),       % The directory where the templates can be found.
-    temp_dir := binary()        % A temporary directory that can be used to generate
+    temp_dir := binary(),       % A temporary directory that can be used to generate
                                 % configuration files and save the log files.
+    net_id := binary()          % Docker network identifier
 }.
 
 %% Node specification
@@ -46,7 +47,7 @@
 %% State of a node
 -type node_state() :: #{
     spec := map(),              % Backup of the spec used when adding the node
-    log_fun := log_fun(),        % Function to use for logging
+    log_fun := log_fun(),       % Function to use for logging
     hostname := atom(),         % Hostname of the container running the node
     exposed_ports := #{service_label() => pos_integer()},
     local_ports := #{service_label() => pos_integer()}
@@ -70,17 +71,24 @@ start(Options) ->
     {ok, DataDir} = maps:find(data_dir, Options),
     {ok, TempDir} = maps:find(temp_dir, Options),
     ok = aest_docker_api:start(),
+    NetName = <<"epoch", Postfix/binary>>,
+    #{'Id' := NetId} = aest_docker_api:create_network(#{name => NetName}),
+    log(LogFun, "Network ~p [~s] created", [NetName, NetId]),
     #{postfix => Postfix,
       log_fun => LogFun,
       data_dir => DataDir,
-      temp_dir => TempDir
+      temp_dir => TempDir,
+      net_id => NetId
     }.
 
 
 -spec stop(BackendState) -> ok
     when BackendState :: backend_state().
 
-stop(_BackendState) -> ok.
+stop(BackendState) ->
+    aest_docker_api:prune_networks(),
+    log(BackendState, "Networks pruned", []),
+    ok.
 
 
 -spec setup_node(Spec, BackendState) -> NodeState
@@ -92,12 +100,14 @@ setup_node(Spec, BackendState) ->
     #{log_fun := LogFun,
       postfix := Postfix,
       data_dir := DataDir,
-      temp_dir := TempDir} = BackendState,
+      temp_dir := TempDir,
+      net_id := NetId} = BackendState,
     #{name := Name,
       peers := Peers,
       source := {pull, Image}} = Spec,
 
-    ExtAddr = format("http://~s:~w/", [Name, ?EXT_HTTP_PORT]),
+    Hostname = format("~s~s", [Name, Postfix]),
+    ExtAddr = format("http://~s:~w/", [Hostname, ?EXT_HTTP_PORT]),
     ExposedPorts = #{
         ext_http => ?EXT_HTTP_PORT,
         int_http => ?INT_HTTP_PORT,
@@ -107,7 +117,8 @@ setup_node(Spec, BackendState) ->
     NodeState = #{
         spec => spec,
         log_fun => LogFun,
-        hostname => Name,
+        name => Name,
+        hostname => Hostname,
         exposed_ports => ExposedPorts,
         local_ports => LocalPorts
     },
@@ -117,7 +128,9 @@ setup_node(Spec, BackendState) ->
     TemplateFile = filename:join(DataDir, ?CONFIG_FILE_TEMPLATE),
     PeerVars = lists:map(fun
         (PeerName) when is_atom(PeerName) ->
-            #{ext_addr => format("http://~s:~w/", [PeerName, ?EXT_HTTP_PORT])};
+            PeerHostname = format("~s~s", [PeerName, Postfix]),
+            PeerUrl = format("http://~s:~w/", [PeerHostname, ?EXT_HTTP_PORT]),
+            #{ext_addr => PeerUrl};
         (PeerUrl) when is_binary(PeerUrl) ->
             #{ext_addr => PeerUrl}
     end, Peers),
@@ -127,13 +140,15 @@ setup_node(Spec, BackendState) ->
         peers => PeerVars
     }},
     ok = write_template(TemplateFile, ConfigFilePath, Context),
-    ContName = format("~s~s", [Name, Postfix]),
     LogPath = filename:join(TempDir, format("~s_logs", [Name])),
+    ok = filelib:ensure_dir(LogPath),
+    ok = file:make_dir(LogPath),
     PortMapping = maps:fold(fun(Label, Port, Acc) ->
         [{tcp, maps:get(Label, LocalPorts), Port} | Acc]
     end, [], ExposedPorts),
     DockerConfig = #{
-        hostname => ContName,
+        hostname => Hostname,
+        network => NetId,
         image => Image,
         env => #{"EPOCH_CONFIG" => ?EPOCH_CONFIG_FILE},
         volumes => [
@@ -142,9 +157,9 @@ setup_node(Spec, BackendState) ->
         ],
         ports => PortMapping
     },
-    #{'Id' := ContId} = aest_docker_api:create_container(ContName, DockerConfig),
+    #{'Id' := ContId} = aest_docker_api:create_container(Hostname, DockerConfig),
     NodeState#{
-        container_name => ContName,
+        container_name => Hostname,
         container_id => ContId,
         config_path => ConfigFilePath
     }.
@@ -183,13 +198,14 @@ stop_node(NodeState) -> stop_node(NodeState, #{}).
 
 stop_node(#{container_id := ID, hostname := Name} = NodeState, Opts) ->
     aest_docker_api:stop_container(ID, Opts),
-    log(NodeState, "Container ~p [~s] stopped ", [Name, ID]),
+    log(NodeState, "Container ~p [~s] stopped", [Name, ID]),
     NodeState.
 
 %=== INTERNAL FUNCTIONS ========================================================
 
-log(#{log_fun := undefined}, _Fmt, _Args) -> ok;
-log(#{log_fun := LogFun}, Fmt, Args) -> LogFun(Fmt, Args).
+log(#{log_fun := LogFun}, Fmt, Args) -> log(LogFun, Fmt, Args);
+log(undefined, _Fmt, _Args) -> ok;
+log(LogFun, Fmt, Args) when is_function(LogFun) -> LogFun(Fmt, Args).
 
 uid2postfix(undefined) -> <<>>;
 uid2postfix(<<>>) -> <<>>;

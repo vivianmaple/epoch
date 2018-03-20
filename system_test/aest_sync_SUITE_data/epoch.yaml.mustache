@@ -2,12 +2,12 @@
 ---
 peers:
 {{#peers}}
-    - http://{{hostname}}:1234/
+    - {{ext_addr}}
 {{/peers}}
 
 http:
     external:
-        peer_address: http://{{hostname}}:1234/
+        peer_address: {{ext_addr}}
     internal:
         listen_address: 0.0.0.0
 

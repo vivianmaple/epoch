@@ -5,6 +5,8 @@
 %% API exports
 -export([start/0]).
 -export([info/0]).
+-export([create_network/1]).
+-export([prune_networks/0]).
 -export([create_container/2]).
 -export([delete_container/1]).
 -export([start_container/1]).
@@ -27,8 +29,23 @@ info() ->
     {ok, 200, Info} = docker_get([info]),
     Info.
 
+create_network(Config) ->
+    BodyObj = maps:fold(fun create_network_object/3, #{}, Config),
+    case docker_post([networks, create], #{}, BodyObj) of
+        {ok, 201, Response} -> Response;
+        {ok, 500, Response} ->
+            throw({docker_error, maps:get(message, Response)})
+    end.
+
+prune_networks() ->
+    case docker_post([networks, prune], #{}) of
+        {ok, 200, Response} -> Response;
+        {ok, 500, Response} ->
+            throw({docker_error, maps:get(message, Response)})
+    end.
+
 create_container(Name, #{image := Image} = Config) ->
-    BodyObj = maps:fold(fun create_body_object/3, #{}, Config),
+    BodyObj = maps:fold(fun create_container_object/3, #{}, Config),
     case docker_post([containers, create], #{name => Name}, BodyObj) of
         {ok, 201, Response} -> Response;
         {ok, 404, _Response} -> throw({no_such_image, Image});
@@ -71,14 +88,21 @@ inspect(ID) ->
 
 %=== INTERNAL FUNCTIONS ========================================================
 
-create_body_object(hostname, Hostname, Body) ->
+create_network_object(name, Name, Body) ->
+    Body#{'Name' => json_string(Name)};
+create_network_object(driver, Driver, Body) ->
+    Body#{'Driver' => json_string(Driver)}.
+
+create_container_object(network, NetId, Body) ->
+    put_in(['HostConfig', 'NetworkMode'], NetId, Body);
+create_container_object(hostname, Hostname, Body) ->
     Body#{'Hostname' => json_string(Hostname)};
-create_body_object(image, Image, Body) ->
+create_container_object(image, Image, Body) ->
     Body#{'Image' => json_string(Image)};
-create_body_object(env, Env, Body) ->
+create_container_object(env, Env, Body) ->
     EnvList = [json_string(K ++ "=" ++ V) || {K, V} <- maps:to_list(Env)],
     Body#{'Env' => EnvList};
-create_body_object(volumes, VolSpecs, Body) ->
+create_container_object(volumes, VolSpecs, Body) ->
     {Volumes, Bindings} = lists:foldl(fun
         ({rw, HostVol, NodeVol}, {VolAcc, BindAcc}) ->
             {VolAcc#{json_string(NodeVol) => #{}},
@@ -90,7 +114,7 @@ create_body_object(volumes, VolSpecs, Body) ->
     HostConfig = maps:get('HostConfig', Body, #{}),
     HostConfig2 = HostConfig#{'Binds' => Bindings},
     Body#{'HostConfig' => HostConfig2, 'Volumes' => Volumes};
-create_body_object(ports, PortSpecs, Body) ->
+create_container_object(ports, PortSpecs, Body) ->
     {Exposed, Bindings} = lists:foldl(fun
         ({Proto, HostPort, ContainerPort}, {ExpAcc, BindAcc}) ->
             Key = format("~w/~s", [ContainerPort, Proto]),
@@ -101,8 +125,12 @@ create_body_object(ports, PortSpecs, Body) ->
     HostConfig = maps:get('HostConfig', Body, #{}),
     HostConfig2 = HostConfig#{'PortBindings' => Bindings},
     Body#{'HostConfig' => HostConfig2, 'ExposedPorts' => Exposed};
-create_body_object(Key, _Value, _Body) ->
+create_container_object(Key, _Value, _Body) ->
     error({unknown_create_param, Key}).
+
+put_in([Key], Val, Map) -> Map#{Key => Val};
+put_in([Key | Keys], Val, Map) ->
+    maps:put(Key, put_in(Keys, Val, maps:get(Key, Map, #{})), Map).
 
 format(Fmt, Args) ->
     iolist_to_binary(io_lib:format(Fmt, Args)).
