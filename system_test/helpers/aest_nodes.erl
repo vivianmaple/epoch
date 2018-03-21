@@ -21,6 +21,7 @@
 
 %% Helper function exports
 -export([request/4]).
+-export([get/5]).
 -export([get_block/3]).
 -export([get_top/2]).
 -export([wait_for_height/4]).
@@ -45,8 +46,34 @@
 %=== TYPRES ====================================================================
 
 -type test_ctx() :: pid() | proplists:proplist().
+-type node_service() :: ext_http | int_http | int_ws.
+-type http_path() :: [atom() | binary() | number()] | binary().
+-type http_query() :: #{atom() | binary() => atom() | binary()}.
+-type json_object() :: term().
+-type milliseconds() :: non_neg_integer().
+
+-type node_spec() :: #{
+    % The unique name of the node
+    name    := atom(),
+    % If peer is given as an atom it is expected to be a node name,
+    % if given as a binary it is expected to be the external URL of the peer.
+    peers   := [atom() | binary()],
+    backend := aest_docker,
+
+%% When `backend` is `aest_docker`:
+
+    % The source of the docker image
+    source  := {pull, binary() | string()}
+}.
 
 %=== COMMON TEST API FUNCTIONS =================================================
+
+%% @doc Setups the the node manager for Common Test.
+%% The CT config passed as argument is returned with extra values used
+%% to contact with the node manager. This config must be passed to all
+%% the the other functions as the `Ctx` parameter.
+-spec ct_setup(Config) -> Config
+    when Config :: proplists:proplist().
 
 ct_setup(Config) ->
     {data_dir, DataDir} = proplists:lookup(data_dir, Config),
@@ -61,13 +88,25 @@ ct_setup(Config) ->
             erlang:error({system_test_setup_failed, [{reason, Reason}]})
     end.
 
-ct_cleanup(Config) ->
-    Pid = ctx2pid(Config),
+
+%% @doc Stops the node manager and all the nodes that were started.
+-spec ct_cleanup(Ctx) -> ok
+    when Ctx :: test_ctx().
+
+ct_cleanup(Ctx) ->
+    Pid = ctx2pid(Ctx),
     call(Pid, cleanup),
     call(Pid, stop),
-    wait_for_exit(Pid, 120000).
+    wait_for_exit(Pid, 120000),
+    ok.
 
 %=== QICKCHECK API FUNCTIONS ===================================================
+
+%% @doc Setups the node manager for Quick Check tests.
+-spec eqc_setup(DataDir, TempDir) -> Ctx
+    when DataDir :: binary() | string(),
+         TempDir :: binary() | string(),
+         Ctx:: test_ctx().
 
 eqc_setup(DataDir, TempDir) ->
     case start(DataDir, TempDir, undefined) of
@@ -76,50 +115,109 @@ eqc_setup(DataDir, TempDir) ->
             erlang:error({system_test_setup_failed, [{reason, Reason}]})
     end.
 
-eqc_cleanup(Pid) ->
+
+%% @doc Stops the node manager for QuickCheck tests.
+-spec eqc_cleanup(Ctx) -> ok
+    when Ctx :: test_ctx().
+
+eqc_cleanup(Ctx) ->
+    Pid = ctx2pid(Ctx),
     call(Pid, cleanup),
     call(Pid, stop),
-    wait_for_exit(Pid, 120000).
+    wait_for_exit(Pid, 120000),
+    ok.
 
 %=== GENERIC API FUNCTIONS =====================================================
+
+%% @doc Creates and setups a list of nodes.
+%% The nodes are not started, use `start_node/2` for that.
+-spec setup_nodes(NodeSpecs, Ctx) -> ok
+    when NodeSpecs :: [node_spec()], Ctx :: test_ctx().
 
 setup_nodes(NodeSpecs, Ctx) ->
     call(ctx2pid(Ctx), {setup_nodes, NodeSpecs}).
 
+
+%% @doc Starts a node previously setup.
+-spec start_node(NodeName, Ctx) -> ok
+    when NodeName :: atom(), Ctx :: test_ctx().
+
 start_node(NodeName, Ctx) ->
     call(ctx2pid(Ctx), {start_node, NodeName}).
+
+
+%% @doc Stops a node previously started.
+-spec stop_node(NodeName, Ctx) -> ok
+    when NodeName :: atom(), Ctx :: test_ctx().
 
 stop_node(NodeName, Ctx) ->
     call(ctx2pid(Ctx), {stop_node, NodeName}).
 
+
+%% @doc Retrieves the address of a given node's service.
+-spec get_service_address(NodeName, Service, Ctx) -> Address
+    when NodeName :: atom(), Service :: node_service(),
+         Ctx :: test_ctx(), Address :: binary().
+
 get_service_address(NodeName, Service, Ctx) ->
     call(ctx2pid(Ctx), {get_service_address, NodeName, Service}).
 
-%% @doc perform and HTTP get on a node service (ext_http or int_http).
+
+%% @doc Performs and HTTP get on a node service (ext_http or int_http).
 -spec http_get(NodeName, Service, Path, Query, Ctx) ->
         {ok, Status, Response} | {error, Reason}
     when NodeName :: atom(),
          Service :: ext_http | int_http,
-         Path :: [atom() | binary() | number()] | binary(),
-         Query :: #{atom() | binary() => atom() | binary()},
+         Path :: http_path(),
+         Query :: http_query(),
          Ctx :: test_ctx(),
          Status :: pos_integer(),
-         Response :: term(),
+         Response :: json_object(),
          Reason :: term().
 
 http_get(NodeName, Service, Path, Query, Ctx) ->
     Addr = get_service_address(NodeName, Service, Ctx),
     http_addr_get(Addr, Path, Query).
 
-
 %=== HELPER FUNCTIONS ==========================================================
 
+%% @doc Performs an HTTP get request on the node external API.
+%% Should preferably use `get/5` with service `ext_http`.
+-spec request(NodeName, Path, Query, Ctx) -> Response
+    when NodeName :: atom(),
+         Path :: http_path(),
+         Query :: http_query(),
+         Ctx :: test_ctx(),
+         Response :: json_object().
+
 request(NodeName, Path, Query, Ctx) ->
-    case http_get(NodeName, ext_http, Path, Query, Ctx) of
+    get(NodeName, ext_http, Path, Query, Ctx).
+
+
+%% @doc Performs an HTTP get request on a node HTTP service.
+-spec get(NodeName, Service, Path, Query, Ctx) -> Response
+    when NodeName :: atom(),
+         Service :: int_http | ext_http,
+         Path :: http_path(),
+         Query :: http_query(),
+         Ctx :: test_ctx(),
+         Response :: json_object().
+
+get(NodeName, Service, Path, Query, Ctx) ->
+    case http_get(NodeName, Service, Path, Query, Ctx) of
         {ok, 200, Response} -> Response;
         {ok, Status, _Response} -> throw({unexpected_status, Status});
         {error, Reason} -> throw({http_error, Reason})
     end.
+
+
+%% @doc Retrieves a block at given height from the given node.
+%% It will throw an excpetion if the block does not exists.
+-spec get_block(NodeName, Height, Ctx) -> Block
+    when NodeName :: atom(),
+         Height :: non_neg_integer(),
+         Ctx :: test_ctx(),
+         Block :: json_object().
 
 get_block(NodeName, Height, Ctx) ->
     case http_get(NodeName, ext_http, [v2, 'block-by-height'],
@@ -129,12 +227,26 @@ get_block(NodeName, Height, Ctx) ->
         {error, Reason} -> throw({http_error, Reason})
     end.
 
+%% @doc Retrieves the top block from the given node.
+-spec get_top(NodeName, Ctx) -> Block
+    when NodeName :: atom(),
+         Ctx :: test_ctx(),
+         Block :: json_object().
+
 get_top(NodeName, Ctx) ->
     case http_get(NodeName, ext_http, [v2, 'top'], #{}, Ctx) of
         {ok, 200, Response} -> Response;
         {ok, Status, _Response} -> throw({unexpected_status, Status});
         {error, Reason} -> throw({http_error, Reason})
     end.
+
+
+%% @doc Waits for each specified nodes to have a block at given heigth.
+-spec wait_for_height(MinHeight, NodeNames, Timeout, Ctx) -> ok
+    when MinHeight :: non_neg_integer(),
+         NodeNames :: [atom()],
+         Timeout :: milliseconds(),
+         Ctx :: test_ctx().
 
 wait_for_height(MinHeight, NodeNames, Timeout, Ctx) ->
     Addrs = [get_service_address(N, ext_http, Ctx) || N <- NodeNames],
