@@ -1,13 +1,8 @@
 -module(aec_genesis_block_settings).
 
 -export([dir/0,
-         preset_accounts/0]).
-
--dialyzer({nowarn_function, read_presets/0}).
-
--ifdef(TEST).
--export([read_presets/0]).
--endif.
+         preset_accounts/0,
+         read_presets/0]).
 
 dir() ->
     filename:join(aeu_env:data_dir(aecore), ".genesis").
