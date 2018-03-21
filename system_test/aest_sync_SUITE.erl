@@ -15,7 +15,8 @@
     setup_nodes/2,
     start_node/2,
     stop_node/2,
-    request/4,
+    get_block/3,
+    get_top/2,
     wait_for_height/4,
     assert_synchronized/2
 ]).
@@ -66,13 +67,13 @@ new_node_join_old_network(Cfg) ->
     start_node(node1, Cfg),
     start_node(node2, Cfg),
     wait_for_height(Length, [node1, node2], Length * ?MINING_TIMEOUT, Cfg),
-    Top1 = request(node1, [v2, 'top'], #{}, Cfg),
+    Top1 = get_top(node1, Cfg),
     ct:log("Node 1 top: ~p~n", [Top1]),
-    Height = request(node2, [v2, 'block-by-height'], #{height => Length}, Cfg),
+    Height = get_block(node2, Length, Cfg),
     ct:log("Node 2 at height ~p: ~p~n", [Length, Height]),
     start_node(node3, Cfg),
     wait_for_height(Length + 1, [node3], ?MINING_TIMEOUT, Cfg),
-    Height = request(node3, [v2, 'block-by-height'], #{height => Length}, Cfg),
+    Height = get_block(node3, Length, Cfg),
     ok.
 
 crash_and_continue_sync(Cfg) ->
@@ -81,7 +82,7 @@ crash_and_continue_sync(Cfg) ->
     setup_nodes([?NODE1, ?NODE2], Cfg),
     start_node(node1, Cfg),
     timer:sleep(Length * ?MINING_TIMEOUT),
-    Top1 = request(node1, [v2, 'top'], #{}, Cfg),
+    Top1 = get_top(node1, Cfg),
     ct:log("Node 1 top: ~p~n", [Top1]),
 
     %% Start fetching the chain and crash node1 while doing so
@@ -89,7 +90,7 @@ crash_and_continue_sync(Cfg) ->
     wait_for_height(1, [node2], 5000, Cfg),
     %% we are fetching blocks crash now
     stop_node(node2, Cfg),
-    Top2 = request(node2, [v2, 'top'], #{}, Cfg),
+    Top2 = get_top(node2, Cfg),
     ct:log("Node 2 top: ~p~n", [Top2]),
     case maps:get(height, Top2) >= maps:get(height,Top1) of
          true -> {skip, already_synced_when_crashed};

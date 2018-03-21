@@ -93,6 +93,11 @@ create_network_object(name, Name, Body) ->
 create_network_object(driver, Driver, Body) ->
     Body#{'Driver' => json_string(Driver)}.
 
+create_container_object(command, Cmd, Body) when is_list(Cmd) ->
+    JsonCmd = [json_string(V) || V <- Cmd],
+    put_in(['Cmd'], JsonCmd, Body);
+create_container_object(command, Cmd, Body) ->
+    put_in(['Cmd'], json_string(Cmd), Body);
 create_container_object(network, NetId, Body) ->
     put_in(['HostConfig', 'NetworkMode'], NetId, Body);
 create_container_object(hostname, Hostname, Body) ->
@@ -192,7 +197,8 @@ encode(JsonObj)   -> jsx:encode(JsonObj, []).
 
 json_string(Atom) when is_atom(Atom) -> Atom;
 json_string(Bin) when is_binary(Bin) -> Bin;
-json_string(Str) when is_list(Str) -> list_to_binary(Str).
+json_string(Str) when is_list(Str) -> list_to_binary(Str);
+json_string(Num) when is_number(Num) -> format("~w", [Num]).
 
 url(Path) -> url(Path, #{}).
 

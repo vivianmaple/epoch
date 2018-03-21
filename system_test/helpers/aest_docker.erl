@@ -16,6 +16,7 @@
 -define(CONFIG_FILE_TEMPLATE, "epoch.yaml.mustache").
 -define(EPOCH_CONFIG_FILE, "/home/epoch/epoch.yaml").
 -define(EPOCH_LOG_FOLDER, "/home/epoch/node/log").
+-define(EPOCH_MINE_RATE, 1000).
 -define(EXT_HTTP_PORT, 3013).
 -define(INT_HTTP_PORT, 3113).
 -define(INT_WS_PORT, 3114).
@@ -57,7 +58,6 @@
 
 %=== GENERIC API FUNCTIONS =====================================================
 
-%% @doc Start the docker
 -spec start(Options) -> State
     when Options :: #{test_id => test_uid(),
                       log_fun => log_fun(),
@@ -134,11 +134,17 @@ setup_node(Spec, BackendState) ->
         (PeerUrl) when is_binary(PeerUrl) ->
             #{ext_addr => PeerUrl}
     end, Peers),
-    Context = #{epoch_config => #{
+    RootVars = #{
         hostname => Name,
         ext_addr => format("http://~s:~w/", [Hostname, ?EXT_HTTP_PORT]),
-        peers => PeerVars
-    }},
+        peers => PeerVars,
+        services => #{
+            ext_http => #{port => ?EXT_HTTP_PORT},
+            int_http => #{port => ?INT_HTTP_PORT},
+            int_ws => #{port => ?INT_WS_PORT}
+        }
+    },
+    Context = #{epoch_config => RootVars},
     ok = write_template(TemplateFile, ConfigFilePath, Context),
     LogPath = filename:join(TempDir, format("~s_logs", [Name])),
     ok = filelib:ensure_dir(LogPath),
@@ -150,6 +156,7 @@ setup_node(Spec, BackendState) ->
         hostname => Hostname,
         network => NetId,
         image => Image,
+        command => ["-aecore", "expected_mine_rate", ?EPOCH_MINE_RATE],
         env => #{"EPOCH_CONFIG" => ?EPOCH_CONFIG_FILE},
         volumes => [
             {ro, ConfigFilePath, ?EPOCH_CONFIG_FILE},

@@ -16,10 +16,14 @@
 -export([setup_nodes/2]).
 -export([start_node/2]).
 -export([stop_node/2]).
--export([request/3]).
+-export([get_service_address/3]).
+-export([http_get/5]).
+
+%% Helper function exports
 -export([request/4]).
+-export([get_block/3]).
+-export([get_top/2]).
 -export([wait_for_height/4]).
--export([assert_synchronized/2]).
 
 %% Behaviour gen_server callbacks
 -export([init/1]).
@@ -37,6 +41,10 @@
 -define(NODE_STOP_TIMEOUT, 30).
 -define(NODE_TEARDOWN_TIMEOUT, 0).
 -define(DEFAULT_HTTP_TIMEOUT, 3000).
+
+%=== TYPRES ====================================================================
+
+-type test_ctx() :: pid() | proplists:proplist().
 
 %=== COMMON TEST API FUNCTIONS =================================================
 
@@ -84,43 +92,54 @@ start_node(NodeName, Ctx) ->
 stop_node(NodeName, Ctx) ->
     call(ctx2pid(Ctx), {stop_node, NodeName}).
 
-request(NodeName, Path, Ctx) ->
-    request(NodeName, Path, #{}, Ctx).
+get_service_address(NodeName, Service, Ctx) ->
+    call(ctx2pid(Ctx), {get_service_address, NodeName, Service}).
+
+%% @doc perform and HTTP get on a node service (ext_http or int_http).
+-spec http_get(NodeName, Service, Path, Query, Ctx) ->
+        {ok, Status, Response} | {error, Reason}
+    when NodeName :: atom(),
+         Service :: ext_http | int_http,
+         Path :: [atom() | binary() | number()] | binary(),
+         Query :: #{atom() | binary() => atom() | binary()},
+         Ctx :: test_ctx(),
+         Status :: pos_integer(),
+         Response :: term(),
+         Reason :: term().
+
+http_get(NodeName, Service, Path, Query, Ctx) ->
+    Addr = get_service_address(NodeName, Service, Ctx),
+    http_addr_get(Addr, Path, Query).
+
+
+%=== HELPER FUNCTIONS ==========================================================
 
 request(NodeName, Path, Query, Ctx) ->
-    Addr = call(ctx2pid(Ctx), {get_service_address, NodeName, ext_http}),
-    case http_get(Addr, Path, Query) of
-        {error, Reason} -> throw(Reason);
-        {ok, 200, Response} -> Response
+    case http_get(NodeName, ext_http, Path, Query, Ctx) of
+        {ok, 200, Response} -> Response;
+        {ok, Status, _Response} -> throw({unexpected_status, Status});
+        {error, Reason} -> throw({http_error, Reason})
+    end.
+
+get_block(NodeName, Height, Ctx) ->
+    case http_get(NodeName, ext_http, [v2, 'block-by-height'],
+                  #{height => Height}, Ctx) of
+        {ok, 200, Response} -> Response;
+        {ok, Status, _Response} -> throw({unexpected_status, Status});
+        {error, Reason} -> throw({http_error, Reason})
+    end.
+
+get_top(NodeName, Ctx) ->
+    case http_get(NodeName, ext_http, [v2, 'top'], #{}, Ctx) of
+        {ok, 200, Response} -> Response;
+        {ok, Status, _Response} -> throw({unexpected_status, Status});
+        {error, Reason} -> throw({http_error, Reason})
     end.
 
 wait_for_height(MinHeight, NodeNames, Timeout, Ctx) ->
-    Pid = ctx2pid(Ctx),
-    Addrs = [call(Pid, {get_service_address, N, ext_http}) || N <- NodeNames],
-    StartTime = os:timestamp(),
-    wait_for_height(MinHeight, Addrs, [], 500, StartTime, Timeout).
-
-wait_for_height(_Height, [], [], _Delay, _StartTime, _Timeout) -> ok;
-wait_for_height(Height, [], Rem, Delay, StartTime, Timeout) ->
-    timer:sleep(Delay),
-    wait_for_height(Height, lists:reverse(Rem), [], Delay, StartTime, Timeout);
-wait_for_height(Height, [Addr | Addrs], Rem, Delay, StartTime, Timeout) ->
-    case http_get(Addr, [v2, 'block-by-height'], #{height => Height}) of
-        {ok, 200, _} ->
-            wait_for_height(Height, Addrs, Rem, Delay, StartTime, Timeout);
-        _ ->
-            Now = os:timestamp(),
-            Delta = timer:now_diff(Now, StartTime),
-            case Delta > (Timeout * 1000) of
-                true -> throw(timeout);
-                false ->
-                    wait_for_height(Height, Addrs, [Addr | Rem],
-                                    Delay, StartTime, Timeout)
-            end
-    end.
-
-assert_synchronized(_NodeNames, _Ctx) ->
-    ok.
+    Addrs = [get_service_address(N, ext_http, Ctx) || N <- NodeNames],
+    Expiration = make_expiration(Timeout),
+    wait_for_height(MinHeight, Addrs, [], 500, Expiration).
 
 %=== BEHAVIOUR GEN_SERVER CALLBACK FUNCTIONS ===================================
 
@@ -196,10 +215,34 @@ wait_for_exit(Pid, Timeout) ->
     after Timeout -> error({process_not_stopped, Pid})
     end.
 
-http_get(Addr, Path, Query) ->
-    http_get(Addr, Path, Query, #{}).
+make_expiration(Timeout) ->
+    {os:timestamp(), Timeout}.
 
-http_get(Addr, Path, Query, Opts) ->
+assert_expiration({StartTime, Timeout}) ->
+    Now = os:timestamp(),
+    Delta = timer:now_diff(Now, StartTime),
+    case Delta > (Timeout * 1000) of
+        true -> throw(timeout);
+        false -> ok
+    end.
+
+wait_for_height(_Height, [], [], _Delay, _Expiration) -> ok;
+wait_for_height(Height, [], Rem, Delay, Expiration) ->
+    assert_expiration(Expiration),
+    timer:sleep(Delay),
+    wait_for_height(Height, lists:reverse(Rem), [], Delay, Expiration);
+wait_for_height(Height, [Addr | Addrs], Rem, Delay, Expiration) ->
+    case http_addr_get(Addr, [v2, 'block-by-height'], #{height => Height}) of
+        {ok, 200, _} ->
+            wait_for_height(Height, Addrs, Rem, Delay, Expiration);
+        _ ->
+            wait_for_height(Height, Addrs, [Addr | Rem], Delay, Expiration)
+    end.
+
+http_addr_get(Addr, Path, Query) ->
+    http_addr_get(Addr, Path, Query, #{}).
+
+http_addr_get(Addr, Path, Query, Opts) ->
     Timeout = maps:get(timeout, Opts, ?DEFAULT_HTTP_TIMEOUT),
     HttpOpts = [{recv_timeout, Timeout}],
     case hackney:request(get, url(Addr, Path, Query), [], <<>>, HttpOpts) of
