@@ -13,6 +13,7 @@
 -import(aest_nodes, [
     setup_nodes/2,
     start_node/2,
+    request/4,
     wait_for_height/4,
     assert_synchronized/2
 ]).
@@ -59,8 +60,12 @@ new_node_join_old_network(Cfg) ->
     setup_nodes([?NODE1, ?NODE2, ?NODE3], Cfg),
     start_node(node1, Cfg),
     start_node(node2, Cfg),
-    wait_for_height(20, [node1, node2], 20 * ?MINING_TIMOUT, Cfg),
+    wait_for_height(1, [node1, node2], 2 * ?MINING_TIMOUT, Cfg),
+    io:format(user, "Node 1: ~p~n", [request(node1, [v2, 'block-by-height'], #{height => 1}, Cfg)]),
+    io:format(user, "Node 2: ~p~n", [request(node2, [v2, 'block-by-height'], #{height => 1}, Cfg)]),
+    wait_for_height(5, [node1, node2], 5 * ?MINING_TIMOUT, Cfg),
     assert_synchronized([node1, node2], Cfg),
     start_node(node3, Cfg),
-    wait_for_height(20, [node3], 5 * ?MINING_TIMOUT, Cfg),
+    wait_for_height(5, [node3], 5 * ?MINING_TIMOUT, Cfg),
+    io:format(user, "Node 3: ~p~n", [request(node3, [v2, 'block-by-height'], #{height => 1}, Cfg)]),
     assert_synchronized([node1, node3], Cfg).

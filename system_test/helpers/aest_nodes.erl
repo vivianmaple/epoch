@@ -16,6 +16,8 @@
 -export([setup_nodes/2]).
 -export([start_node/2]).
 -export([stop_node/2]).
+-export([request/3]).
+-export([request/4]).
 -export([wait_for_height/4]).
 -export([assert_synchronized/2]).
 
@@ -31,10 +33,10 @@
 -define(BACKENDS, [aest_docker]).
 -define(CALL_TAG, ?MODULE).
 -define(CT_CONF_KEY, node_manager).
--define(CALL_TIMEOUT, 60).
+-define(CALL_TIMEOUT, 60000).
 -define(NODE_STOP_TIMEOUT, 30).
 -define(NODE_TEARDOWN_TIMEOUT, 0).
-
+-define(DEFAULT_HTTP_TIMEOUT, 3000).
 
 %=== COMMON TEST API FUNCTIONS =================================================
 
@@ -82,9 +84,40 @@ start_node(NodeName, Ctx) ->
 stop_node(NodeName, Ctx) ->
     call(ctx2pid(Ctx), {stop_node, NodeName}).
 
-wait_for_height(_MinHeight, _NodeNames, _Timeout, _Ctx) ->
-    % _Nodes = call(ctx2pid(Ctx), get_nodes),
-    ok.
+request(NodeName, Path, Ctx) ->
+    request(NodeName, Path, #{}, Ctx).
+
+request(NodeName, Path, Query, Ctx) ->
+    Addr = call(ctx2pid(Ctx), {get_service_address, NodeName, ext_http}),
+    case http_get(Addr, Path, Query) of
+        {error, Reason} -> throw(Reason);
+        {ok, 200, Response} -> Response
+    end.
+
+wait_for_height(MinHeight, NodeNames, Timeout, Ctx) ->
+    Pid = ctx2pid(Ctx),
+    Addrs = [call(Pid, {get_service_address, N, ext_http}) || N <- NodeNames],
+    StartTime = os:timestamp(),
+    wait_for_height(MinHeight, Addrs, [], 500, StartTime, Timeout).
+
+wait_for_height(_Height, [], [], _Delay, _StartTime, _Timeout) -> ok;
+wait_for_height(Height, [], Rem, Delay, StartTime, Timeout) ->
+    timer:sleep(Delay),
+    wait_for_height(Height, lists:reverse(Rem), [], Delay, StartTime, Timeout);
+wait_for_height(Height, [Addr | Addrs], Rem, Delay, StartTime, Timeout) ->
+    case http_get(Addr, [v2, 'block-by-height'], #{height => Height}) of
+        {ok, 200, _} ->
+            wait_for_height(Height, Addrs, Rem, Delay, StartTime, Timeout);
+        _ ->
+            Now = os:timestamp(),
+            Delta = timer:now_diff(Now, StartTime),
+            case Delta > (Timeout * 1000) of
+                true -> throw(timeout);
+                false ->
+                    wait_for_height(Height, Addrs, [Addr | Rem],
+                                    Delay, StartTime, Timeout)
+            end
+    end.
 
 assert_synchronized(_NodeNames, _Ctx) ->
     ok.
@@ -103,6 +136,8 @@ handle_call(Request, From, State) ->
             {reply, {'$error', Reason, erlang:get_stacktrace()}, State}
     end.
 
+handlex({get_service_address, NodeName, Service}, _From, State) ->
+    {reply, mgr_get_service_address(NodeName, Service, State), State};
 handlex({setup_nodes, NodeSpecs}, _From, State) ->
     {reply, ok, mgr_setup_nodes(NodeSpecs, State)};
 handlex({start_node, NodeName}, _From, State) ->
@@ -128,6 +163,9 @@ terminate(_Reason, State) ->
 
 %=== INTERNAL FUNCTIONS ========================================================
 
+log(#{log_fun := undefined}, _Fmt, _Args) -> ok;
+log(#{log_fun := LogFun}, Fmt, Args) -> LogFun(Fmt, Args).
+
 uid() ->
     iolist_to_binary([[io_lib:format("~2.16.0B",[X])
                        || <<X:8>> <= crypto:strong_rand_bytes(8) ]]).
@@ -141,7 +179,7 @@ ctx2pid(Props) when is_list(Props) ->
     end.
 
 call(Pid, Msg) ->
-    case gen_server:call(Pid, Msg, ?CALL_TIMEOUT * 1000) of
+    case gen_server:call(Pid, Msg, ?CALL_TIMEOUT) of
         {'$error', Reason, Stacktrace} ->
             erlang:raise(throw, Reason, Stacktrace);
         Reply ->
@@ -149,6 +187,7 @@ call(Pid, Msg) ->
     end.
 
 start(DataDir, TempDir, LogFun) ->
+    {ok, _} = application:ensure_all_started(hackney),
     gen_server:start_link(?MODULE, [DataDir, TempDir, LogFun], []).
 
 wait_for_exit(Pid, Timeout) ->
@@ -157,10 +196,34 @@ wait_for_exit(Pid, Timeout) ->
     after Timeout -> error({process_not_stopped, Pid})
     end.
 
-%--- NODE MANAGER PROCESS FUNCTION ---------------------------------------------
+http_get(Addr, Path, Query) ->
+    http_get(Addr, Path, Query, #{}).
 
-log(#{log_fun := undefined}, _Fmt, _Args) -> ok;
-log(#{log_fun := LogFun}, Fmt, Args) -> LogFun(Fmt, Args).
+http_get(Addr, Path, Query, Opts) ->
+    Timeout = maps:get(timeout, Opts, ?DEFAULT_HTTP_TIMEOUT),
+    HttpOpts = [{recv_timeout, Timeout}],
+    case hackney:request(get, url(Addr, Path, Query), [], <<>>, HttpOpts) of
+        {error, _Reason} = Error -> Error;
+        {ok, Status, _RespHeaders, ClientRef} ->
+            {ok, Status, hackney_json_body(ClientRef)}
+    end.
+
+url(Base, Path, QS) when is_list(Path) ->
+    hackney_url:make_url(Base, [to_binary(P) || P <- Path], maps:to_list(QS));
+url(Base, Item, QS) ->
+    url(Base, [Item], QS).
+
+to_binary(Term) when is_atom(Term) -> atom_to_binary(Term, utf8);
+to_binary(Term)                    -> Term.
+
+hackney_json_body(ClientRef) ->
+    case hackney:body(ClientRef) of
+        {error, _Reason} = Error -> Error;
+        {ok, BodyJson} ->
+            jsx:decode(BodyJson, [{labels, attempt_atom}, return_maps])
+    end.
+
+%--- NODE MANAGER PROCESS FUNCTION ---------------------------------------------
 
 mgr_setup(DataDir, TempDir, LogFun) ->
     TestId = uid(),
@@ -181,6 +244,10 @@ mgr_cleanup(State) ->
     State2 = mgr_safe_stop_all(?NODE_TEARDOWN_TIMEOUT, State),
     State3 = mgr_safe_delete_all(State2),
     mgr_safe_stop_backends(State3).
+
+mgr_get_service_address(NodeName, Service, #{nodes := Nodes}) ->
+    #{NodeName := {Mod, NodeState}} = Nodes,
+    Mod:get_service_address(Service, NodeState).
 
 mgr_setup_nodes(NodeSpecs, State) ->
     lists:foldl(fun mgr_setup_node/2, State, NodeSpecs).

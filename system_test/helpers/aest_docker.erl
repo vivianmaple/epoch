@@ -9,6 +9,7 @@
 -export([delete_node/1]).
 -export([start_node/1]).
 -export([stop_node/1, stop_node/2]).
+-export([get_service_address/2]).
 
 %=== MACROS ====================================================================
 
@@ -107,7 +108,6 @@ setup_node(Spec, BackendState) ->
       source := {pull, Image}} = Spec,
 
     Hostname = format("~s~s", [Name, Postfix]),
-    ExtAddr = format("http://~s:~w/", [Hostname, ?EXT_HTTP_PORT]),
     ExposedPorts = #{
         ext_http => ?EXT_HTTP_PORT,
         int_http => ?INT_HTTP_PORT,
@@ -136,7 +136,7 @@ setup_node(Spec, BackendState) ->
     end, Peers),
     Context = #{epoch_config => #{
         hostname => Name,
-        ext_addr => ExtAddr,
+        ext_addr => format("http://~s:~w/", [Hostname, ?EXT_HTTP_PORT]),
         peers => PeerVars
     }},
     ok = write_template(TemplateFile, ConfigFilePath, Context),
@@ -158,6 +158,7 @@ setup_node(Spec, BackendState) ->
         ports => PortMapping
     },
     #{'Id' := ContId} = aest_docker_api:create_container(Hostname, DockerConfig),
+    log(NodeState, "Container ~p [~s] created", [Name, ContId]),
     NodeState#{
         container_name => Hostname,
         container_id => ContId,
@@ -200,6 +201,14 @@ stop_node(#{container_id := ID, hostname := Name} = NodeState, Opts) ->
     aest_docker_api:stop_container(ID, Opts),
     log(NodeState, "Container ~p [~s] stopped", [Name, ID]),
     NodeState.
+
+
+-spec get_service_address(NodeState, Service) -> binary()
+    when NodeState :: node_state(), Service :: service_label().
+
+get_service_address(Service, NodeState) ->
+    #{local_ports := #{Service := Port}} = NodeState,
+    format("http://localhost:~w/", [Port]).
 
 %=== INTERNAL FUNCTIONS ========================================================
 
