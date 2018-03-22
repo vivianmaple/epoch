@@ -8,7 +8,7 @@
 -export([end_per_testcase/2]).
 
 % Test cases
--export([new_node_join_old_network/1,
+-export([new_node_joins_network/1,
          docker_keeps_data/1,
          crash_and_continue_sync/1]).
 
@@ -49,7 +49,7 @@
 %=== COMMON TEST FUNCTIONS =====================================================
 
 all() ->
-    [ new_node_join_old_network
+    [ new_node_joins_network
     , docker_keeps_data
     %% , crash_and_continue_sync 
     ].
@@ -65,7 +65,8 @@ end_per_testcase(_TC, Config) ->
 
 %=== TEST CASES ================================================================
 
-new_node_join_old_network(Cfg) ->
+
+new_node_joins_network(Cfg) ->
     Length = 10,
     BlocksPerSecond = proplists:get_value(blocks_per_second, Cfg),
     NodeStartupTime = proplists:get_value(node_startup_time, Cfg), 
@@ -90,6 +91,8 @@ new_node_join_old_network(Cfg) ->
     Height = request(node3, [v2, 'block-by-height'], #{height => Length}, Cfg),
     ok.
 
+%% When we stop and restart a node we will be able to read the blocks
+%% that we had in the chain before stopping: data is persistent.
 docker_keeps_data(Cfg) ->
     Length = 10,
     BlocksPerSecond = proplists:get_value(blocks_per_second, Cfg),
@@ -97,13 +100,16 @@ docker_keeps_data(Cfg) ->
 
     setup_nodes([?NODE1], Cfg),
     start_node(node1, Cfg),
-    wait_for_height(Length, [node1, node2], Length * ?MINING_TIMEOUT, Cfg),
+    wait_for_height(Length, [node1], Length * ?MINING_TIMEOUT, Cfg),
     B1 = request(node1, [v2, 'block-by-height'], #{height => Length}, Cfg),
     ct:log("Node 1 at ~p: ~p~n", [Length, B1]),
     stop_node(node1, Cfg),
+    timer:sleep(1000),
+    start_node(node1, Cfg),
     wait_for_height(0, [node1], NodeStartupTime, Cfg),
     ct:log("Node restarted and ready to go"),
-    timer:sleep(1000),
+    timer:sleep(1000),  
+    %% A short time to read from disk, but not build a new chain
     B2 = request(node1, [v2, 'block-by-height'], #{height => Length}, Cfg),
     ct:log("Node 1 after restart on ~p: ~p~n", [Length, B2]),
     B1 = B2.
