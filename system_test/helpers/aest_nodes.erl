@@ -420,10 +420,9 @@ mgr_setup_backends(BackendMods, Opts) ->
                 #{}, BackendMods).
 
 mgr_cleanup(State) ->
-    % State2 = mgr_safe_stop_all(?NODE_TEARDOWN_TIMEOUT, State),
-    % State3 = mgr_safe_delete_all(State2),
-    % mgr_safe_stop_backends(State3).
-    State.
+    State2 = mgr_safe_stop_all(?NODE_TEARDOWN_TIMEOUT, State),
+    State3 = mgr_safe_delete_all(State2),
+    mgr_safe_stop_backends(State3).
 
 mgr_get_service_address(NodeName, Service, #{nodes := Nodes}) ->
     #{NodeName := {Mod, NodeState}} = Nodes,
