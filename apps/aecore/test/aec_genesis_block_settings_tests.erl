@@ -19,12 +19,31 @@ preset_accounts_test_() ->
      fun(ok) ->
          meck:unload(?TEST_MODULE)
      end,
-     [ {"Preset accounts parsing: empty file",
+     [ {"Preset accounts parsing: broken file",
         fun() ->
+            %% empty file
             expect_accounts(<<"">>),
+            ?assertError(invalid_accounts_json, ?TEST_MODULE:preset_accounts()),
+            %% broekn json
+            expect_accounts(<<"{">>),
+            ?assertError(invalid_accounts_json, ?TEST_MODULE:preset_accounts()),
+            %% broken json
+            expect_accounts(<<"{\"Alice\":1,\"Bob\":2">>),
+            ?assertError(invalid_accounts_json, ?TEST_MODULE:preset_accounts()),
+            %% not json at all 
+            expect_accounts(<<"Hejsan svejsan">>),
+            ?assertError(invalid_accounts_json, ?TEST_MODULE:preset_accounts()),
+            ok
+        end},
+       {"Preset accounts parsing: empty object",
+        fun() ->
+            expect_accounts(<<"{}">>),
+            ?assertEqual([], ?TEST_MODULE:preset_accounts()),
+            expect_accounts(<<"{ }">>),
             ?assertEqual([], ?TEST_MODULE:preset_accounts()),
             ok
         end},
+
        {"Preset accounts parsing: a preset account",
         fun() ->
             expect_accounts([{<<"some pubkey">>, 10}]),

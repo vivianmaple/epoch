@@ -15,16 +15,14 @@ preset_accounts() ->
             erlang:error({genesis_accounts_file_missing, PresetAccountsFile});
         {ok, JSONData} ->
             DecodedData =
-                case JSONData of
-                    <<"{}">> ->
-                        %% JSX decodes an empty json object as [{}]:
-                        %% [{}] = jsx:decode(<<"{}">>).
-                        [];
-                    <<"">> ->
-                        %% empty accounts.json file
-                        [];
-                    _ ->
-                        jsx:decode(JSONData)   
+                try jsx:decode(JSONData) of
+                    %% JSX decodes an empty json object as [{}]:
+                    %% [{}] = jsx:decode(<<"{}">>).
+                    [{}] -> [];
+                    L when is_list(L) -> L
+                catch
+                  error:_ ->
+                    erlang:error(invalid_accounts_json)
                 end,
             Accounts =
                 lists:map(
