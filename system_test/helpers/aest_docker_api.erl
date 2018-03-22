@@ -1,5 +1,5 @@
 %% For a description of the API used see
-%% https://docs.docker.com/engine/api/v1.24/
+%% https://docs.docker.com/engine/api/v1.32/
 %%
 
 -module(aest_docker_api).
