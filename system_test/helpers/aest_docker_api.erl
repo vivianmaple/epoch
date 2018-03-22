@@ -1,3 +1,7 @@
+%% For a description of the API used see
+%% https://docs.docker.com/engine/api/v1.24/
+%%
+
 -module(aest_docker_api).
 
 %=== EXPORTS ===================================================================
