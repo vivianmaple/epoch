@@ -147,8 +147,7 @@ setup_node(Spec, BackendState) ->
     Context = #{epoch_config => RootVars},
     ok = write_template(TemplateFile, ConfigFilePath, Context),
     LogPath = filename:join(TempDir, format("~s_logs", [Name])),
-    ok = filelib:ensure_dir(LogPath),
-    ok = file:make_dir(LogPath),
+    ok = filelib:ensure_dir(filename:join(LogPath, "DUMMY")),
     PortMapping = maps:fold(fun(Label, Port, Acc) ->
         [{tcp, maps:get(Label, LocalPorts), Port} | Acc]
     end, [], ExposedPorts),
