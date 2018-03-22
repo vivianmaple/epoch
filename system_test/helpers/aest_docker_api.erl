@@ -73,11 +73,17 @@ start_container(ID) ->
     end.
 
 stop_container(ID, Opts) ->
-    SoftTimeout = maps:get(soft_timeout, Opts, ?CONTAINER_STOP_TIMEOUT),
-    HardTimeout = maps:get(hard_timeout, Opts,
-                           SoftTimeout + ?CONTAINER_KILL_TIMEOUT_EXTRA),
-    case docker_post([containers, ID, stop], #{t => SoftTimeout},
-                     undefined, HardTimeout * 1000) of
+    STDefault = ?CONTAINER_STOP_TIMEOUT,
+    {Query, HTDefault} = case maps:get(soft_timeout, Opts, STDefault) of
+        infinity -> {#{}, infinity};
+        STSecs ->
+            {#{t => STSecs}, STSecs + ?CONTAINER_KILL_TIMEOUT_EXTRA}
+    end,
+    ReqTimeout = case maps:get(hard_timeout, Opts, HTDefault) of
+        infinity -> infinity;
+        HTSecs -> HTSecs * 1000
+    end,
+    case docker_post([containers, ID, stop], Query, undefined, ReqTimeout) of
         {ok, 204, _} -> ok;
         {ok, 304, _} -> throw({container_not_started, ID});
         {ok, 500, Response} ->

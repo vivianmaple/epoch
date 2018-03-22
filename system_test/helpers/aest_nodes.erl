@@ -15,7 +15,7 @@
 %% Generic API exports
 -export([setup_nodes/2]).
 -export([start_node/2]).
--export([stop_node/2]).
+-export([stop_node/2, stop_node/3]).
 -export([get_service_address/3]).
 -export([http_get/5]).
 
@@ -39,9 +39,9 @@
 -define(CALL_TAG, ?MODULE).
 -define(CT_CONF_KEY, node_manager).
 -define(CALL_TIMEOUT, 60000).
--define(NODE_STOP_TIMEOUT, 30).
 -define(NODE_TEARDOWN_TIMEOUT, 0).
 -define(DEFAULT_HTTP_TIMEOUT, 3000).
+-define(DEFAULT_STOP_TIMEOUT, 30).
 
 %=== TYPRES ====================================================================
 
@@ -51,6 +51,7 @@
 -type http_query() :: #{atom() | binary() => atom() | binary()}.
 -type json_object() :: term().
 -type milliseconds() :: non_neg_integer().
+-type seconds() :: non_neg_integer().
 
 -type node_spec() :: #{
     % The unique name of the node
@@ -147,11 +148,23 @@ start_node(NodeName, Ctx) ->
 
 
 %% @doc Stops a node previously started.
+%% The node will get killed after 30 seconds if it does not stop.
 -spec stop_node(NodeName, Ctx) -> ok
     when NodeName :: atom(), Ctx :: test_ctx().
 
 stop_node(NodeName, Ctx) ->
-    call(ctx2pid(Ctx), {stop_node, NodeName}).
+    call(ctx2pid(Ctx), {stop_node, NodeName, ?DEFAULT_STOP_TIMEOUT}).
+
+
+%% @doc Stops a node previously started with explicit timeout (in seconds)
+%% after which the node will be killed.
+-spec stop_node(NodeName, Timeout, Ctx) -> ok
+    when NodeName :: atom(),
+         Timeout :: seconds() | infinity,
+         Ctx :: test_ctx().
+
+stop_node(NodeName, Timeout, Ctx) ->
+    call(ctx2pid(Ctx), {stop_node, NodeName, Timeout}).
 
 
 %% @doc Retrieves the address of a given node's service.
@@ -273,8 +286,8 @@ handlex({setup_nodes, NodeSpecs}, _From, State) ->
     {reply, ok, mgr_setup_nodes(NodeSpecs, State)};
 handlex({start_node, NodeName}, _From, State) ->
     {reply, ok, mgr_start_node(NodeName, State)};
-handlex({stop_node, NodeName}, _From, State) ->
-    {reply, ok, mgr_stop_node(NodeName, State)};
+handlex({stop_node, NodeName, Timeout}, _From, State) ->
+    {reply, ok, mgr_stop_node(NodeName, Timeout, State)};
 handlex(cleanup, _From, State) ->
     {reply, ok, mgr_cleanup(State)};
 handlex(stop, _From, State) ->
@@ -396,9 +409,10 @@ mgr_setup_backends(BackendMods, Opts) ->
                 #{}, BackendMods).
 
 mgr_cleanup(State) ->
-    State2 = mgr_safe_stop_all(?NODE_TEARDOWN_TIMEOUT, State),
-    State3 = mgr_safe_delete_all(State2),
-    mgr_safe_stop_backends(State3).
+    % State2 = mgr_safe_stop_all(?NODE_TEARDOWN_TIMEOUT, State),
+    % State3 = mgr_safe_delete_all(State2),
+    % mgr_safe_stop_backends(State3).
+    State.
 
 mgr_get_service_address(NodeName, Service, #{nodes := Nodes}) ->
     #{NodeName := {Mod, NodeState}} = Nodes,
@@ -418,9 +432,9 @@ mgr_start_node(NodeName, #{nodes := Nodes} = State) ->
     NodeState2 = Mod:start_node(NodeState),
     State#{nodes := Nodes#{NodeName := {Mod, NodeState2}}}.
 
-mgr_stop_node(NodeName, #{nodes := Nodes} = State) ->
+mgr_stop_node(NodeName, Timeout, #{nodes := Nodes} = State) ->
     #{NodeName := {Mod, NodeState}} = Nodes,
-    Opts = #{soft_timout => ?NODE_STOP_TIMEOUT},
+    Opts = #{soft_timout => Timeout},
     NodeState2 = Mod:stop_node(NodeState, Opts),
     State#{nodes := Nodes#{NodeName := {Mod, NodeState2}}}.
 
