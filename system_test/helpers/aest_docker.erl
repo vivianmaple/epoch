@@ -9,6 +9,7 @@
 -export([delete_node/1]).
 -export([start_node/1]).
 -export([stop_node/1, stop_node/2]).
+-export([kill_node/1]).
 -export([get_service_address/2]).
 
 %=== MACROS ====================================================================
@@ -207,6 +208,15 @@ stop_node(NodeState) -> stop_node(NodeState, #{}).
 stop_node(#{container_id := ID, hostname := Name} = NodeState, Opts) ->
     aest_docker_api:stop_container(ID, Opts),
     log(NodeState, "Container ~p [~s] stopped", [Name, ID]),
+    NodeState.
+
+
+-spec kill_node(NodeState) -> NodeState
+    when NodeState :: node_state().
+
+kill_node(#{container_id := ID, hostname := Name} = NodeState) ->
+    aest_docker_api:kill_container(ID),
+    log(NodeState, "Container ~p [~s] killed", [Name, ID]),
     NodeState.
 
 

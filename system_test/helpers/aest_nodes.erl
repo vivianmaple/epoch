@@ -16,6 +16,7 @@
 -export([setup_nodes/2]).
 -export([start_node/2]).
 -export([stop_node/2, stop_node/3]).
+-export([kill_node/2]).
 -export([get_service_address/3]).
 -export([http_get/5]).
 
@@ -167,6 +168,14 @@ stop_node(NodeName, Timeout, Ctx) ->
     call(ctx2pid(Ctx), {stop_node, NodeName, Timeout}).
 
 
+%% @doc Kills a node.
+-spec kill_node(NodeName, Ctx) -> ok
+    when NodeName :: atom(), Ctx :: test_ctx().
+
+kill_node(NodeName, Ctx) ->
+    call(ctx2pid(Ctx), {kill_node, NodeName}).
+
+
 %% @doc Retrieves the address of a given node's service.
 -spec get_service_address(NodeName, Service, Ctx) -> Address
     when NodeName :: atom(), Service :: node_service(),
@@ -288,6 +297,8 @@ handlex({start_node, NodeName}, _From, State) ->
     {reply, ok, mgr_start_node(NodeName, State)};
 handlex({stop_node, NodeName, Timeout}, _From, State) ->
     {reply, ok, mgr_stop_node(NodeName, Timeout, State)};
+handlex({kill_node, NodeName}, _From, State) ->
+    {reply, ok, mgr_kill_node(NodeName, State)};
 handlex(cleanup, _From, State) ->
     {reply, ok, mgr_cleanup(State)};
 handlex(stop, _From, State) ->
@@ -436,6 +447,11 @@ mgr_stop_node(NodeName, Timeout, #{nodes := Nodes} = State) ->
     #{NodeName := {Mod, NodeState}} = Nodes,
     Opts = #{soft_timout => Timeout},
     NodeState2 = Mod:stop_node(NodeState, Opts),
+    State#{nodes := Nodes#{NodeName := {Mod, NodeState2}}}.
+
+mgr_kill_node(NodeName, #{nodes := Nodes} = State) ->
+    #{NodeName := {Mod, NodeState}} = Nodes,
+    NodeState2 = Mod:kill_node(NodeState),
     State#{nodes := Nodes#{NodeName := {Mod, NodeState2}}}.
 
 mgr_safe_stop_backends(#{backends := Backends} = State) ->

@@ -15,6 +15,7 @@
 -export([delete_container/1]).
 -export([start_container/1]).
 -export([stop_container/2]).
+-export([kill_container/1]).
 -export([inspect/1]).
 
 %=== MACROS ====================================================================
@@ -60,6 +61,7 @@ create_container(Name, #{image := Image} = Config) ->
 delete_container(ID) ->
     case docker_delete([containers, ID]) of
         {ok, 204, _} -> ok;
+        {ok, 404, _} -> throw({container_not_found, ID});
         {ok, 500, Response} ->
             throw({docker_error, maps:get(message, Response)})
     end.
@@ -68,6 +70,7 @@ start_container(ID) ->
     case docker_post([containers, ID, start]) of
         {ok, 204, _} -> ok;
         {ok, 304, _} -> throw({container_already_started, ID});
+        {ok, 404, _} -> throw({container_not_found, ID});
         {ok, 500, Response} ->
             throw({docker_error, maps:get(message, Response)})
     end.
@@ -86,10 +89,19 @@ stop_container(ID, Opts) ->
     case docker_post([containers, ID, stop], Query, undefined, ReqTimeout) of
         {ok, 204, _} -> ok;
         {ok, 304, _} -> throw({container_not_started, ID});
+        {ok, 404, _} -> throw({container_not_found, ID});
         {ok, 500, Response} ->
             throw({docker_error, maps:get(message, Response)});
         {error, timeout} ->
             throw({container_stop_timeout, ID})
+    end.
+
+kill_container(ID) ->
+    case docker_post([containers, ID, kill]) of
+        {ok, 204, _} -> ok;
+        {ok, 404, _} -> throw({container_not_found, ID});
+        {ok, 500, Response} ->
+            throw({docker_error, maps:get(message, Response)})
     end.
 
 inspect(ID) ->
