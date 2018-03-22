@@ -206,8 +206,8 @@ request(NodeName, Path, Query, Ctx) ->
 get(NodeName, Service, Path, Query, Ctx) ->
     case http_get(NodeName, Service, Path, Query, Ctx) of
         {ok, 200, Response} -> Response;
-        {ok, Status, _Response} -> throw({unexpected_status, Status});
-        {error, Reason} -> throw({http_error, Reason})
+        {ok, Status, _Response} -> error({unexpected_status, Status});
+        {error, Reason} -> error({http_error, Reason})
     end.
 
 
@@ -223,8 +223,8 @@ get_block(NodeName, Height, Ctx) ->
     case http_get(NodeName, ext_http, [v2, 'block-by-height'],
                   #{height => Height}, Ctx) of
         {ok, 200, Response} -> Response;
-        {ok, Status, _Response} -> throw({unexpected_status, Status});
-        {error, Reason} -> throw({http_error, Reason})
+        {ok, Status, _Response} -> error({unexpected_status, Status});
+        {error, Reason} -> error({http_error, Reason})
     end.
 
 %% @doc Retrieves the top block from the given node.
@@ -236,8 +236,8 @@ get_block(NodeName, Height, Ctx) ->
 get_top(NodeName, Ctx) ->
     case http_get(NodeName, ext_http, [v2, 'top'], #{}, Ctx) of
         {ok, 200, Response} -> Response;
-        {ok, Status, _Response} -> throw({unexpected_status, Status});
-        {error, Reason} -> throw({http_error, Reason})
+        {ok, Status, _Response} -> error({unexpected_status, Status});
+        {error, Reason} -> error({http_error, Reason})
     end.
 
 

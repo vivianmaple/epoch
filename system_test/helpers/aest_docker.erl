@@ -155,6 +155,7 @@ setup_node(Spec, BackendState) ->
         hostname => Hostname,
         network => NetId,
         image => Image,
+        ulimits => [{nofile, 1024, 1024}],
         command => ["-aecore", "expected_mine_rate", ?EPOCH_MINE_RATE],
         env => #{"EPOCH_CONFIG" => ?EPOCH_CONFIG_FILE},
         volumes => [

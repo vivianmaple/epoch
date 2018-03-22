@@ -97,6 +97,10 @@ create_network_object(name, Name, Body) ->
 create_network_object(driver, Driver, Body) ->
     Body#{'Driver' => json_string(Driver)}.
 
+create_container_object(ulimits, Limits, Body) when is_list(Limits) ->
+    JsonLimits = [#{'Name' => json_string(N), 'Soft' => S, 'Hard' => H}
+                  || {N, S, H} <- Limits],
+    put_in(['HostConfig', 'Ulimits'], JsonLimits, Body);
 create_container_object(command, Cmd, Body) when is_list(Cmd) ->
     JsonCmd = [json_string(V) || V <- Cmd],
     put_in(['Cmd'], JsonCmd, Body);
