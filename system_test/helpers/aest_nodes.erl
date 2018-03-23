@@ -358,7 +358,7 @@ assert_expiration({StartTime, Timeout}) ->
     Now = os:timestamp(),
     Delta = timer:now_diff(Now, StartTime),
     case Delta > (Timeout * 1000) of
-        true -> throw(timeout);
+        true -> error(timeout);
         false -> ok
     end.
 
@@ -451,7 +451,7 @@ mgr_start_node(NodeName, #{nodes := Nodes} = State) ->
 
 mgr_stop_node(NodeName, Timeout, #{nodes := Nodes} = State) ->
     #{NodeName := {Mod, NodeState}} = Nodes,
-    Opts = #{soft_timout => Timeout},
+    Opts = #{soft_timeout => Timeout},
     NodeState2 = Mod:stop_node(NodeState, Opts),
     State#{nodes := Nodes#{NodeName := {Mod, NodeState2}}}.
 

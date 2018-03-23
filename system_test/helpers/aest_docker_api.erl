@@ -23,6 +23,9 @@
 -define(BASE_URL, <<"http+unix://%2Fvar%2Frun%2Fdocker.sock/">>).
 -define(CONTAINER_STOP_TIMEOUT, 30).
 -define(CONTAINER_KILL_TIMEOUT_EXTRA, 5).
+%% It seems there is no way to disable the killing timout,
+%% it just default to 10 seconds. So we just set a big one...
+-define(CONTAINER_STOP_INFINTY, 24*60*60).
 
 %=== API FUNCTIONS =============================================================
 
@@ -78,7 +81,7 @@ start_container(ID) ->
 stop_container(ID, Opts) ->
     STDefault = ?CONTAINER_STOP_TIMEOUT,
     {Query, HTDefault} = case maps:get(soft_timeout, Opts, STDefault) of
-        infinity -> {#{}, infinity};
+        infinity -> {#{t => ?CONTAINER_STOP_INFINTY}, infinity};
         STSecs ->
             {#{t => STSecs}, STSecs + ?CONTAINER_KILL_TIMEOUT_EXTRA}
     end,
