@@ -10,7 +10,7 @@ dir() ->
 -spec preset_accounts() -> list().
 preset_accounts() ->
     case ?MODULE:read_presets() of
-        {error, _Err, PresetAccountsFile} ->
+        {error, {_Err, PresetAccountsFile}} ->
             % no setup, no preset accounts
             erlang:error({genesis_accounts_file_missing, PresetAccountsFile});
         {ok, JSONData} ->
@@ -40,5 +40,5 @@ read_presets() ->
     PresetAccountsFile = filename:join([dir(), "accounts.json"]),
     case file:read_file(PresetAccountsFile) of
         {ok, _} = OK -> OK;
-        {error, Err} -> {error, Err, PresetAccountsFile}
+        {error, Err} -> {error, {Err, PresetAccountsFile}}
     end.

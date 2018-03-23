@@ -24,7 +24,7 @@ preset_accounts_test_() ->
             %% empty file
             expect_accounts(<<"">>),
             ?assertError(invalid_accounts_json, ?TEST_MODULE:preset_accounts()),
-            %% broekn json
+            %% broken json
             expect_accounts(<<"{">>),
             ?assertError(invalid_accounts_json, ?TEST_MODULE:preset_accounts()),
             %% broken json
@@ -64,7 +64,7 @@ preset_accounts_test_() ->
        {"Preset accounts parsing: preset accounts file missing",
         fun() ->
             FileName = file_path,
-            meck:expect(?TEST_MODULE, read_presets, 0, {error, something, FileName}),
+            meck:expect(?TEST_MODULE, read_presets, 0, {error, {something, FileName}}),
             ?assertError({genesis_accounts_file_missing, FileName}, ?TEST_MODULE:preset_accounts()),
             ok
         end}
