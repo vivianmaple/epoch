@@ -420,9 +420,16 @@ mgr_setup_backends(BackendMods, Opts) ->
                 #{}, BackendMods).
 
 mgr_cleanup(State) ->
-    State2 = mgr_safe_stop_all(?NODE_TEARDOWN_TIMEOUT, State),
-    State3 = mgr_safe_delete_all(State2),
-    mgr_safe_stop_backends(State3).
+    %% So node cleanup can be disabled for debugging without commenting
+    %% and accidently pushing code without cleanup...
+    case os:getenv("EPOCH_DISABLE_NODE_CLEANUP") of
+        Value when Value =:= "true"; Value =:= "1" ->
+            State;
+        _ ->
+            State2 = mgr_safe_stop_all(?NODE_TEARDOWN_TIMEOUT, State),
+            State3 = mgr_safe_delete_all(State2),
+            mgr_safe_stop_backends(State3)
+    end.
 
 mgr_get_service_address(NodeName, Service, #{nodes := Nodes}) ->
     #{NodeName := {Mod, NodeState}} = Nodes,

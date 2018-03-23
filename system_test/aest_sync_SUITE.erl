@@ -15,49 +15,59 @@
 -import(aest_nodes, [
     setup_nodes/2,
     start_node/2,
-    stop_node/2,
+    stop_node/2, stop_node/3,
+    kill_node/2,
     request/4,
     wait_for_height/4,
     assert_synchronized/2
 ]).
 
+%=== INCLUDES ==================================================================
+
+-include_lib("eunit/include/eunit.hrl").
+
 %=== MACROS ====================================================================
 
--define(MINING_TIMEOUT, 4*10000).
+% -define(MINING_TIMEOUT, 4*10000).
+-define(MINING_TIMEOUT, 1000).
 
 -define(NODE1, #{
     name    => node1,
     peers   => [node2],
     backend => aest_docker,
-    source  => {pull, "aetrnty/epoch:v0.8.0"}
+    source  => {pull, "aetrnty/builder:local"}
+    % source  => {pull, "aetrnty/epoch:v0.8.0"}
 }).
 
 -define(NODE2, #{
     name    => node2,
     peers   => [node1],
     backend => aest_docker,
-    source => {pull, "aetrnty/epoch:v0.8.0"}
+    source  => {pull, "aetrnty/builder:local"}
+    % source => {pull, "aetrnty/epoch:v0.8.0"}
 }).
 
 -define(NODE3, #{
     name    => node3,
     peers   => [node1],
     backend => aest_docker,
-    source  => {pull, "aetrnty/epoch:local"}
+    source  => {pull, "aetrnty/builder:local"}
+    % source  => {pull, "aetrnty/epoch:local"}
 }).
 
 %=== COMMON TEST FUNCTIONS =====================================================
 
-all() ->
-    [ new_node_joins_network
+all() -> [
+    new_node_joins_network
     , docker_keeps_data
-    , crash_and_continue_sync 
-    ].
+    , crash_and_continue_sync
+].
 
 init_per_testcase(_TC, Config) ->
     %% Some parameters depend on the speed and capacity of the docker containers:
     aest_nodes:ct_setup([ {blocks_per_second, 3},
-                          {node_startup_time, 5000}  %% Time it takes to get the node to respond to http
+                          {node_startup_time, 5000}, %% Time it takes to get the node to respond to http
+                          {node_stop_time, 20000}    %% Time it takes to get the node to stop cleanly
                           | Config]).
 
 end_per_testcase(_TC, Config) ->
@@ -96,30 +106,34 @@ new_node_joins_network(Cfg) ->
 %% When we stop and restart a node we will be able to read the blocks
 %% that we had in the chain before stopping: data is persistent.
 docker_keeps_data(Cfg) ->
-    Length = 10,
-    BlocksPerSecond = proplists:get_value(blocks_per_second, Cfg),
+    Length = 20,
     NodeStartupTime = proplists:get_value(node_startup_time, Cfg), 
 
     setup_nodes([?NODE1], Cfg),
     start_node(node1, Cfg),
+    wait_for_height(0, [node1], NodeStartupTime, Cfg),
+    StartTime = os:timestamp(),
     wait_for_height(Length, [node1], Length * ?MINING_TIMEOUT, Cfg),
+    EndTime = os:timestamp(),
+    MiningTime = timer:now_diff(EndTime, StartTime) div (1000 * Length),
     B1 = request(node1, [v2, 'block-by-height'], #{height => Length}, Cfg),
     ct:log("Node 1 at ~p: ~p~n", [Length, B1]),
-    stop_node(node1, Cfg),
-    timer:sleep(1000),  %% Is this triggering PT-155851463 ?
+    stop_node(node1, Cfg), %% Is this triggering PT-155851463 ?
     start_node(node1, Cfg),
     wait_for_height(0, [node1], NodeStartupTime, Cfg),
     ct:log("Node restarted and ready to go"),
     %% Give it time to read from disk, but not enough to build a new chain of same length
-    timer:sleep(?MINING_TIMEOUT),  
+    timer:sleep(MiningTime * 2),
     B2 = request(node1, [v2, 'block-by-height'], #{height => Length}, Cfg),
     ct:log("Node 1 after restart on ~p: ~p~n", [Length, B2]),
-    B1 = B2.
+    ?assertEqual(B1, B2),
+    ok.
 
 
 crash_and_continue_sync(Cfg) ->
     BlocksPerSecond = proplists:get_value(blocks_per_second, Cfg),
     NodeStartupTime = proplists:get_value(node_startup_time, Cfg),
+    NodeStopTime = proplists:get_value(node_stop_time, Cfg),
     %% Create a chain long enough to need 10 seconds to fetch it
     Length = BlocksPerSecond * 10,
 
@@ -135,9 +149,7 @@ crash_and_continue_sync(Cfg) ->
     ct:log("Node 2 ready to go"),
 
     %% we are fetching blocks crash now
-    stop_node(node1, Cfg),
-    %% Give node1 possibility to really stop 
-    timer:sleep(NodeStartupTime),
+    stop_node(node1, NodeStopTime div 1000, Cfg),
     Top2 = request(node2, [v2, 'top'], #{}, Cfg),
     ct:log("Node 2 top: ~p~n", [Top2]),
     Height = maps:get(height, Top2),
