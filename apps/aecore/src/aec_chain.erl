@@ -8,6 +8,7 @@
 
 %%% Chain API
 -export([ find_common_ancestor/2
+        , find_transaction_in_main_chain_or_mempool/1
         , genesis_block/0
         , genesis_hash/0
         , genesis_header/0
@@ -19,12 +20,14 @@
         , get_header/1
         , get_header_by_height/1
         , get_missing_block_hashes/0
-        , get_n_headers_from_hash/2
+        , get_n_headers_backwards_from_hash/2
+        , get_at_most_n_headers_forward_from_hash/2
         , get_top_N_blocks_time_summary/1
         , get_transactions_between/2
         , has_block/1
         , has_header/1
         , hash_is_connected_to_genesis/1
+        , hash_is_in_main_chain/1
         , top_block/0
         , top_block_hash/0
         , top_block_header/0
@@ -186,6 +189,25 @@ get_transactions_between(Hash, Root, Acc) ->
         error -> error
     end.
 
+-spec find_transaction_in_main_chain_or_mempool(binary()) ->
+                                                   'none' |
+                                                   {binary() | 'mempool', aetx:tx()}.
+find_transaction_in_main_chain_or_mempool(TxHash) ->
+    case aec_db:read_tx(TxHash) of
+        [] -> none;
+        [_|_] = BlockTxsList -> pick_transaction(BlockTxsList, none)
+    end.
+
+pick_transaction([{mempool, Tx}|Left], none) ->
+    pick_transaction(Left, {mempool, Tx});
+pick_transaction([{Hash, Tx}|Left], Acc) when is_binary(Hash) ->
+    %% Pick the transaction if it was included in the main chain
+    case aec_chain:hash_is_in_main_chain(Hash) of
+        true  -> {Hash, Tx};
+        false -> pick_transaction(Left, Acc)
+    end;
+pick_transaction([], Acc) ->
+    Acc.
 
 %%%===================================================================
 %%% Chain
@@ -251,23 +273,67 @@ genesis_header() ->
 find_common_ancestor(Hash1, Hash2) when is_binary(Hash1), is_binary(Hash2) ->
     aec_chain_state:find_common_ancestor(Hash1, Hash2).
 
+
+-spec hash_is_in_main_chain(binary()) -> boolean().
+hash_is_in_main_chain(Hash) when is_binary(Hash) ->
+    case get_header(Hash) of
+        error -> false;
+        {ok, Header} ->
+            Height = aec_headers:height(Header),
+            {ok, Hash} =:= aec_chain_state:get_hash_at_height(Height)
+    end.
+
 -spec hash_is_connected_to_genesis(binary()) -> boolean().
 hash_is_connected_to_genesis(Hash) when is_binary(Hash) ->
     aec_chain_state:hash_is_connected_to_genesis(Hash).
 
--spec get_n_headers_from_hash(binary(), pos_integer()) -> {'ok', [aec_headers:header()]} |
-                                                          'error'.
-%% @doc Get n headers backwards in chain. Returns headers old -> new
-get_n_headers_from_hash(Hash, N) when is_binary(Hash), is_integer(N), N > 0 ->
-    get_n_headers_from_hash(get_header(Hash), N, []).
 
-get_n_headers_from_hash(_, 0, Acc) ->
+
+-spec get_at_most_n_headers_forward_from_hash(binary(), pos_integer()) ->
+                                                 {'ok', [aec_headers:header()]} |
+                                                 'error'.
+
+%%% @doc Get n headers forwards in chain. Returns headers old -> new
+%%%      This function is only defined for headers in the main chain to avoid
+%%%      ambiguity.
+get_at_most_n_headers_forward_from_hash(Hash, N) when is_binary(Hash), is_integer(N), N > 0 ->
+    case top_header() of
+        undefined -> error;
+        TopHeader ->
+            TopHeight = aec_headers:height(TopHeader),
+            case get_header(Hash) of
+                error -> error;
+                {ok, Header} ->
+                    Height = aec_headers:height(Header),
+                    Delta = min(TopHeight - Height, N - 1),
+                    case Delta < 0 of
+                        true -> error;
+                        false ->
+                            Res = {ok, _} = get_header_by_height(Height + Delta),
+                            {ok, Headers} = get_n_headers_backwards_from_hash(Res, Delta + 1, []),
+                            %% Validate that we were on the main fork.
+                            case aec_headers:hash_header(hd(Headers)) =:= {ok, Hash} of
+                                true -> {ok, Headers};
+                                false -> error
+                            end
+                    end
+            end
+    end.
+
+-spec get_n_headers_backwards_from_hash(binary(), pos_integer()) ->
+                                           {'ok', [aec_headers:header()]} |
+                                           'error'.
+%%% @doc Get n headers backwards in chain. Returns headers old -> new
+get_n_headers_backwards_from_hash(Hash, N) when is_binary(Hash), is_integer(N), N > 0 ->
+    get_n_headers_backwards_from_hash(get_header(Hash), N, []).
+
+get_n_headers_backwards_from_hash(_, 0, Acc) ->
     {ok, Acc};
-get_n_headers_from_hash({ok, Header}, N, Acc) ->
+get_n_headers_backwards_from_hash({ok, Header}, N, Acc) ->
     PrevHash = aec_headers:prev_hash(Header),
     NewAcc = [Header|Acc],
-    get_n_headers_from_hash(get_header(PrevHash), N - 1, NewAcc);
-get_n_headers_from_hash(error,_N,_Acc) ->
+    get_n_headers_backwards_from_hash(get_header(PrevHash), N - 1, NewAcc);
+get_n_headers_backwards_from_hash(error,_N,_Acc) ->
     error.
 
 -spec get_missing_block_hashes() -> [binary()].
@@ -333,7 +399,6 @@ validate_block_range(HeightFrom, HeightTo) ->
 
 -spec difficulty_at_top_block() -> {'ok', float()} | {'error', atom()}.
 difficulty_at_top_block() ->
-    %% TODO: This should be cached.
     case top_block_hash() of
         undefined -> {error, no_top};
         Hash -> difficulty_at_hash(Hash)
@@ -341,29 +406,26 @@ difficulty_at_top_block() ->
 
 -spec difficulty_at_top_header() -> {'ok', float()} | {'error', atom()}.
 difficulty_at_top_header() ->
-    %% TODO: This should be cached.
-    case top_header_hash() of
+    case aec_db:get_top_header_difficulty() of
         undefined -> {error, no_top};
-        Hash -> difficulty_at_hash(Hash)
+        Difficulty -> {ok, Difficulty}
     end.
 
 -spec difficulty_at_hash(binary()) -> {'ok', float()} | {'error', atom()}.
 difficulty_at_hash(Hash) ->
-    case genesis_hash() of
-        undefined -> {error, not_rooted};
-        GHash -> difficulty_at_hash(Hash, GHash, 0)
-    end.
+    difficulty_at_hash(Hash, 0).
 
-difficulty_at_hash(GHash, GHash, Acc) ->
-    {ok, Header} = get_header(GHash),
-    {ok, Acc + aec_headers:difficulty(Header)};
-difficulty_at_hash(Hash, GHash, Acc) ->
-    case get_header(Hash) of
-        error -> {error, 'not_rooted'};
-        {ok, Header} ->
-            NewAcc = Acc + aec_headers:difficulty(Header),
-            PrevHash = aec_headers:prev_hash(Header),
-            difficulty_at_hash(PrevHash, GHash, NewAcc)
+difficulty_at_hash(Hash, Acc) ->
+    case aec_db:find_block_difficulty(Hash) of
+        {value, Difficulty} -> {ok, Acc + Difficulty};
+        none ->
+            case get_header(Hash) of
+                error -> {error, 'not_rooted'};
+                {ok, Header} ->
+                    NewAcc = Acc + aec_headers:difficulty(Header),
+                    PrevHash = aec_headers:prev_hash(Header),
+                    difficulty_at_hash(PrevHash, NewAcc)
+            end
     end.
 
 %%%===================================================================

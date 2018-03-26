@@ -37,6 +37,7 @@
 -export([ping/2,
          top/1,
          get_header_by_hash/2,
+         get_n_successors/3,
          get_header_by_height/2,
          get_block_by_height/2,
          get_block/2,
@@ -49,9 +50,8 @@
 
 -import(aeu_debug, [pp/1]).
 
--type http_uri_uri() :: string() | unicode:unicode_binary(). %% From https://github.com/erlang/otp/blob/OTP-20.2.3/lib/inets/doc/src/http_uri.xml#L57
--type http_uri_host() :: string() | unicode:unicode_binary(). %% From https://github.com/erlang/otp/blob/OTP-20.2.3/lib/inets/doc/src/http_uri.xml#L64
--type http_uri_port() :: pos_integer(). %% https://github.com/erlang/otp/blob/OTP-20.2.3/lib/inets/doc/src/http_uri.xml#L66
+-type http_uri_uri() :: string() | binary(). %% From https://github.com/erlang/otp/blob/9fc5b13/lib/inets/src/http_lib/http_uri.erl#L72
+-type http_uri_host() :: string() | binary(). %% From https://github.com/erlang/otp/blob/9fc5b13/lib/inets/src/http_lib/http_uri.erl#L75
 
 -type response(Type) :: {ok, Type} | {error, string()}.
 
@@ -143,15 +143,26 @@ get_header_by_hash(Uri, Hash) ->
             {error, unexpected_response}
     end.
 
-
-%% Add API for header later... now use block
--spec get_header_by_height(http_uri_uri(), non_neg_integer()) -> response(aec_headers:header()).
-get_header_by_height(Uri, Height) when is_integer(Height) ->
-    Response = process_request(Uri, 'GetBlockByHeight', [{"height", integer_to_list(Height)}]),
+%% Get the next n hashes and their heights
+-spec get_n_successors(http_uri_uri(),  binary(), non_neg_integer()) -> response([{integer(), binary()}]).
+get_n_successors(Uri, Hash, N) when is_integer(N) ->
+    EncHash = aec_base58c:encode(block_hash, Hash),
+    Response = process_request(Uri, 'GetHeadersByHash', [{"hash", EncHash}, 
+                                                         {"number", integer_to_list(N+1)}, 
+                                                         {"direction", "forward"}]),
     case Response of
-        {ok, 200, Data} ->
-            {ok, Block} = aec_blocks:deserialize_from_map(Data),  %% needs to be headers later
-            {ok, aec_blocks:to_header(Block)};
+        {ok, 200, [_|Data]} ->
+            %% Keep them in order, oldest block is first!
+            {ok, lists:foldr(fun(Header, Acc) ->
+                            case aec_headers:deserialize_from_map(Header) of
+                                {ok, H} ->
+                                    {ok, HH} = aec_headers:hash_header(H),
+                                    [ {aec_headers:height(H), HH} | Acc ];
+                                 {error, deserialize} ->
+                                    lager:info("Got bad block hash from ~p", [Uri]),
+                                    Acc
+                            end
+                        end, [], Data)};
         {error, _Reason} = Error ->
             Error;
         _ ->
@@ -160,12 +171,32 @@ get_header_by_height(Uri, Height) when is_integer(Height) ->
             {error, unexpected_response}
     end.
 
+%% Add API for header later... now use block
+-spec get_header_by_height(http_uri_uri(), non_neg_integer()) -> response(aec_headers:header()).
+get_header_by_height(Uri, Height) when is_integer(Height) ->
+    Response = process_request(Uri, 'GetHeaderByHeight', [{"height", integer_to_list(Height)}]),
+    case Response of
+        {ok, 200, Data} ->
+            {ok, _Header} = aec_headers:deserialize_from_map(Data);
+        {ok, 400, Reason} ->
+            lager:debug("Header not found ~p", [Reason]),
+            {error, chain_too_short};
+        _ ->
+            %% Should have been turned to {error, _} by swagger validation
+            lager:debug("unexpected response (~p): ~p", [Uri, Response]),
+            {error, unexpected_response}
+    end.
+
+
+
 -spec get_block_by_height(http_uri_uri(), non_neg_integer()) -> response(aec_headers:header()).
 get_block_by_height(Uri, Height) when is_integer(Height) ->
     Response = process_request(Uri, 'GetBlockByHeight', [{"height", integer_to_list(Height)}]),
     case Response of
         {ok, 200, Data} ->
-            {ok, Block} = aec_blocks:deserialize_from_map(Data);
+            {ok, _Block} = aec_blocks:deserialize_from_map(Data);
+        {ok, 404, #{reason := <<"Chain too short">>}} ->
+            {error, chain_too_short};
         {error, _Reason} = Error ->
             Error;
         _ ->
@@ -276,7 +307,8 @@ process_request(Uri, OperationId, Params) ->
     aeu_http_client:request(Uri, OperationId, Params).
 
 %% No trailing /, since BaseUri starts with /
--spec pp_uri({http_uri:scheme(), http_uri_host(), http_uri_port()}) -> binary().
+-spec pp_uri({http_uri:scheme(), http_uri_host(), inet:port_number()}) ->
+                    binary().
 pp_uri({Scheme, Host, Port}) when is_list(Host) ->
     pp_uri({Scheme, unicode:characters_to_binary(Host, utf8), Port});
 pp_uri({Scheme, Host, Port}) ->

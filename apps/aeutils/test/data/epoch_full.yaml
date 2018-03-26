@@ -25,10 +25,14 @@ http:
         request_timeout: 1000
         # Less than request_timeout
         connect_timeout: 100
+        # Number of acceptors in server pool
+        acceptors: 10
     internal:
         # The internal listen address should be not publicly accessible
         listen_address: 127.0.0.1
         port: 3113
+        # Number of acceptors in server pool
+        acceptors: 10
 
 websocket:
     internal:
@@ -53,6 +57,8 @@ mining:
     autostart: true
     # Maximum time (milliseconds) for each attempt to mine a block with a specific nonce.
     attempt_timeout: 3600000
+    # Expected mine rate (milliseconds) between blocks. Used in governance.
+    expected_mine_rate: 300000
     cuckoo:
         miner:
             # Executable binary of the miner.
@@ -65,6 +71,8 @@ mining:
 logging:
     # Controls the overload protection in the logs.
     hwm: 50
+    # Sets the level of logging.
+    level: debug
 
 metrics:
     # StatsD server and port

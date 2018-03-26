@@ -5,9 +5,26 @@ references:
     setup_remote_docker:
       docker_layer_caching: true
     docker:
-      - image: aetrnty/builder
+      - image: aeternity/builder
         user: builder
     working_directory: ~/epoch
+    environment:
+      DOCKER_CLIENT_VERSION: "17.09.0-ce"
+      DOCKERHUB_REPO: aeternity/epoch
+
+  setup_remote_docker: &setup_remote_docker
+    setup_remote_docker:
+      docker_layer_caching: true
+      version: "17.09.0-ce"
+
+  install_docker_client: &install_docker_client
+    run:
+      name: Install Docker client
+      command: |
+        curl -L -o /tmp/docker-${DOCKER_CLIENT_VERSION:?}.tgz \
+          https://download.docker.com/linux/static/stable/x86_64/docker-${DOCKER_CLIENT_VERSION:?}.tgz
+        tar -xz -C /tmp -f /tmp/docker-${DOCKER_CLIENT_VERSION:?}.tgz
+        mkdir ~/bin && mv /tmp/docker/docker ~/bin
 
   merge_checkout: &merge_checkout
     run:
@@ -28,6 +45,25 @@ references:
   restore_build_cache: &restore_build_cache
     restore_cache:
       key: *build_cache_key
+
+  pip_cache_key: &pip_cache_key pip-v1-{{ checksum "deployment/ansible/pip-requirements.txt" }}
+  restore_pip_cache: &restore_pip_cache
+    restore_cache:
+      keys:
+        - *pip_cache_key
+        - pip-v1
+
+  save_pip_cache: &save_pip_cache
+    save_cache:
+      key: *pip_cache_key
+      paths:
+        - ~/.cache/pip
+
+  install_pip_requirements: &install_pip_requirements
+    run:
+      name: Install PIP Requirements
+      command: |
+        pip install --user -r deployment/ansible/pip-requirements.txt
 
   packages_workspace: &packages_workspace /tmp/packages
   set_package_path: &set_package_path
@@ -74,12 +110,11 @@ references:
 
   deploy_steps: &deploy_steps
     - checkout
+    - *restore_pip_cache
+    - *install_pip_requirements
+    - *save_pip_cache
     - attach_workspace:
         at: *packages_workspace
-    - run:
-        name: Install PIP Requirements
-        command: |
-          pip install --user -r deployment/ansible/pip-requirements.txt
     - run:
         name: Deploy
         environment:
@@ -87,8 +122,8 @@ references:
         command: |
           export PACKAGE=${PACKAGES_DIR:?}/epoch-$(cat VERSION)-ubuntu.tar.gz
           cd deployment/ansible
-          ansible-playbook -i inventory/openstack.yml --limit="epoch:&${DEPLOY_ENV:?}" \
-            --extra-vars "package=${PACKAGE:?} env=${DEPLOY_ENV:?}" \
+          ansible-playbook --limit="tag_role_epoch:&tag_env_${DEPLOY_ENV:?}" \
+            --extra-vars "package=${PACKAGE:?} hosts_group=tag_env_${DEPLOY_ENV:?} env=${DEPLOY_ENV:?}" \
             deploy.yml
 
   upload_github_release_asset: &upload_github_release_asset
@@ -153,6 +188,17 @@ jobs:
             epmd -daemon
             make eunit
 
+  aevm_tests:
+    <<: *container_config
+    steps:
+      - checkout
+      - *restore_rebar_cache
+      - *restore_build_cache
+      - run:
+          name: AEVM Tests
+          command: |
+            make aevm-test
+
   static_analysis:
     <<: *container_config
     steps:
@@ -176,6 +222,7 @@ jobs:
       - run: make dialyzer
       - run: make swagger-check
       - run: make rebar-lock-check
+      - run: ./rebar3 xref || true
 
   linux_package:
     <<: *container_config
@@ -259,6 +306,61 @@ jobs:
           path: _build/dev3/rel/epoch/log
           destination: node3/
 
+  docker_image_build:
+    <<: *container_config
+    steps:
+      - checkout
+      - *setup_remote_docker
+      - *install_docker_client
+      - run:
+          name: Build Docker image
+          command: |
+            ~/bin/docker build .
+
+  docker_push_tag:
+    <<: *container_config
+    steps:
+      - checkout
+      - *setup_remote_docker
+      - *install_docker_client
+      - run:
+          name: Build and push Docker image to DockerHub
+          command: |
+            ~/bin/docker login -u $DOCKER_USER -p $DOCKER_PASS
+            ~/bin/docker build -t ${DOCKERHUB_REPO:?}:${CIRCLE_TAG:?} -t ${DOCKERHUB_REPO:?}:latest .
+            ~/bin/docker push ${DOCKERHUB_REPO:?}:${CIRCLE_TAG:?}
+            ~/bin/docker push ${DOCKERHUB_REPO:?}:latest
+
+  docker_push_dev:
+    <<: *container_config
+    steps:
+      - checkout
+      - *setup_remote_docker
+      - *install_docker_client
+      - run:
+          name: Build and push Docker image to DockerHub
+          command: |
+            ~/bin/docker login -u $DOCKER_USER -p $DOCKER_PASS
+            ~/bin/docker build -t ${DOCKERHUB_REPO:?}:dev .
+            ~/bin/docker push ${DOCKERHUB_REPO:?}:dev
+
+  uat_chain_snapshot:
+    <<: *container_config
+    steps:
+      - checkout
+      - *restore_pip_cache
+      - *install_pip_requirements
+      - *save_pip_cache
+      - run:
+          name: Snapshot of UAT blockchain
+          command: |
+            cd deployment/ansible
+            ansible-playbook --limit="tag_role_epoch:&tag_env_uat" \
+              --extra-vars "download_dir=/tmp/chain_snapshots backup_suffix=db_backup_$(date +%s)" \
+              mnesia_backup.yml
+      - store_artifacts:
+          path: /tmp/chain_snapshots
+
   deploy_integration:
     <<: *container_config
     environment:
@@ -315,6 +417,14 @@ workflows:
             tags:
               only: /^v.*$/
 
+      - docker_image_build:
+          filters:
+            branches:
+              ignore:
+                - env/dev1
+                - env/dev2
+                - master
+
       - deploy_api_docs:
           requires:
             - static_analysis
@@ -346,6 +456,13 @@ workflows:
             tags:
               only: /^v.*$/
 
+      - uat_tests:
+          requires:
+            - build
+          filters:
+            branches:
+              only: master
+
       - static_analysis:
           requires:
             - build
@@ -373,8 +490,19 @@ workflows:
           requires:
             - test
             - eunit
+            - uat_tests
             - static_analysis
             - linux_package
+          filters:
+            branches:
+              only: master
+
+      - docker_push_dev:
+          requires:
+            - test
+            - eunit
+            - uat_tests
+            - static_analysis
           filters:
             branches:
               only: master
@@ -440,6 +568,18 @@ workflows:
             tags:
               only: /^v.*$/
 
+      - docker_push_tag:
+          requires:
+            - test
+            - eunit
+            - static_analysis
+            - hodl
+          filters:
+            branches:
+              ignore: /.*/
+            tags:
+              only: /^v.*$/
+
   nightly:
     triggers:
       - schedule:
@@ -449,4 +589,16 @@ workflows:
               only:
                 - master
     jobs:
-      - uat_tests
+      - aevm_tests
+
+  chain_snapshots:
+    triggers:
+      - schedule:
+          # run Sun, Tue, Thu at midnight UTC
+          cron: "0 0 * * 0,2,4"
+          filters:
+            branches:
+              only:
+                - master
+    jobs:
+      - uat_chain_snapshot

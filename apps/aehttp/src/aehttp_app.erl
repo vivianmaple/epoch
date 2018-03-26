@@ -19,6 +19,8 @@
 %% Application callbacks
 -export([start/2, stop/1]).
 
+-export([check_env/0]).
+
 %% Tests only
 -export([ws_handlers_queue_max_size/0]).
 
@@ -43,24 +45,55 @@ stop(_State) ->
     ok.
 
 
+%%------------------------------------------------------------------------------
+%% Check user-provided environment
+%%------------------------------------------------------------------------------
+
+check_env() ->
+    %TODO: we need to validate that all tags are present
+    GroupDefaults = #{<<"gossip">>        => true,
+                      <<"name_service">>   => true,
+                      <<"chain">>         => true,
+                      <<"transactions">>  => true,
+                      <<"node_operator">> => true,
+                      <<"dev">>           => true,
+                      <<"debug">>         => true,
+                      <<"obsolete">>      => true
+                      },
+    EnabledGroups =
+        lists:foldl(
+            fun({Key, Default}, Accum) ->
+                Enabled =
+                    case aeu_env:user_config([<<"http">>, <<"endpoints">>, Key]) of
+                        {ok, Setting} when is_boolean(Setting) ->
+                            Setting;
+                        undefined ->
+                            Default
+                    end,
+                case Enabled of
+                    true -> [Key | Accum];
+                    false -> Accum
+                end
+            end,
+            [],
+            maps:to_list(GroupDefaults)),
+        application:set_env(aehttp, enabled_endpoint_groups, EnabledGroups),
+    ok.
+
 %%====================================================================
 %% Internal functions
 %%====================================================================
 
 start_http_api() ->
-    ok = start_http_api(external, aehttp_dispatch_ext, swagger_external_handler),
-    ok = start_http_api(internal, aehttp_dispatch_int, swagger_internal_handler).
+    ok = start_http_api(external, aehttp_dispatch_ext),
+    ok = start_http_api(internal, aehttp_dispatch_int).
 
-start_http_api(Target, LogicHandler, SwaggerHandler) ->
+start_http_api(Target, LogicHandler) ->
     PoolSize = get_http_api_acceptors(Target),
     Port = get_http_api_port(Target),
     ListenAddress = get_http_api_listen_address(Target),
 
-    [{'_', Paths0}] = swagger_router:get_paths(LogicHandler),
-    Paths = [{Path, aehttp_api_handler, Args}
-             || {Path, TmpSwaggerHandler, Args} <- Paths0,
-                TmpSwaggerHandler == SwaggerHandler
-            ],
+    Paths = aehttp_api_router:get_paths(Target, LogicHandler),
     Dispatch = cowboy_router:compile([{'_', Paths}]),
 
     {ok, _} = cowboy:start_http(Target, PoolSize, [{port, Port}, {ip, ListenAddress}], [
@@ -88,14 +121,19 @@ get_and_parse_ip_address_from_config_or_env(CfgKey, App, EnvKey, Default) ->
     {ok, IpAddress} = inet:parse_address(binary_to_list(Config)),
     IpAddress.
 
-get_http_api_acceptors(_) -> ?INT_ACCEPTORS_POOLSIZE.
+get_http_api_acceptors(external) ->
+    aeu_env:user_config_or_env([<<"http">>, <<"external">>, <<"acceptors">>],
+                               aehttp, [external, acceptors], ?INT_ACCEPTORS_POOLSIZE);
+get_http_api_acceptors(internal) ->
+    aeu_env:user_config_or_env([<<"http">>, <<"internal">>, <<"acceptors">>],
+                               aehttp, [internal, acceptors], ?INT_ACCEPTORS_POOLSIZE).
 
 get_http_api_port(external) ->
     aeu_env:user_config_or_env([<<"http">>, <<"external">>, <<"port">>],
-                               aehttp, swagger_port_external, ?DEFAULT_SWAGGER_EXTERNAL_PORT);
+                               aehttp, [external, port], ?DEFAULT_SWAGGER_EXTERNAL_PORT);
 get_http_api_port(internal) ->
     aeu_env:user_config_or_env([<<"http">>, <<"internal">>, <<"port">>],
-                               aehttp, [internal, swagger_port], ?DEFAULT_SWAGGER_INTERNAL_PORT).
+                               aehttp, [internal, port], ?DEFAULT_SWAGGER_INTERNAL_PORT).
 
 
 get_http_api_listen_address(external) ->

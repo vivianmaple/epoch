@@ -29,7 +29,7 @@
 %% Callback for jobs producer queue
 -export([sync_worker/0]).
 
--type http_uri_uri() :: string() | unicode:unicode_binary(). %% From https://github.com/erlang/otp/blob/OTP-20.2.3/lib/inets/doc/src/http_uri.xml#L57
+-type http_uri_uri() :: string() | binary(). %% From https://github.com/erlang/otp/blob/9fc5b13/lib/inets/src/http_lib/http_uri.erl#L72
 
 -type ping_obj() :: map().
 
@@ -37,7 +37,10 @@
 -compile([export_all, nowarn_export_all]).
 -endif.
 
--record(sync_peer, {difficulty, from, to, hash, uri}).
+-define(MAX_HEADERS_PER_CHUNK, 100).
+-define(MAX_DIFF_FOR_SYNC, 50).
+
+-record(sync_peer, {difficulty, from, to, hash, uri, pid}).
 
 %%%=============================================================================
 %%% API
@@ -128,15 +131,21 @@ fetch_mempool(Uri) ->
 schedule_ping(Uri) ->
     gen_server:cast(?MODULE, {schedule_ping, Uri}).
 
-fetch_next(Uri, HeightIn, HashIn) ->
-    gen_server:call(?MODULE, {fetch_chain, Uri, HeightIn, HashIn}).
+fetch_next(Uri, HeightIn, HashIn, Result) ->
+    gen_server:call(?MODULE, {fetch_next, Uri, HeightIn, HashIn, Result}).
 
 delete_from_pool(Uri) ->
     gen_server:cast(?MODULE, {delete_from_pool, Uri}).
 
 %% Check whether this header is better than previous best
 new_header(Uri, Header, AgreedHeight, Hash) ->
-    gen_server:call(?MODULE, {new_header, Uri, Header, AgreedHeight, Hash}).
+    gen_server:call(?MODULE, {new_header, self(), Uri, Header, AgreedHeight, Hash}).
+
+update_hash_pool(Hashes) ->
+  gen_server:call(?MODULE, {update_hash_pool, Hashes}).
+
+sync_in_progress(Uri) ->
+   gen_server:call(?MODULE, {sync_in_progress, Uri}).
 
 %%%=============================================================================
 %%% gen_server functions
@@ -154,15 +163,14 @@ new_header(Uri, Header, AgreedHeight, Hash) ->
 %% 2. It has better top hash than our node
 %%    We binary search for a node that we agree upon (could be genesis) 
 %% We add new node to sync pool to sync agreed node upto top of new
-%% 1. If we are already synchronizing, we only update From and To,
-%%    the ongoing sync will pick that up
+%% 1. If we are already synchronizing, we ignore it,
+%%    the ongoing sync will pick that up later
 %% 2. If we are not already synchronizing, we start doing so.
 %% 
-%% We sync with several nodes at the same time and should add a strategy 
-%% to decide for each node what they should be fetching. This is prepared
-%% in the handle call of fetch_chain
+%% We sync with several nodes at the same time and use as strategy 
+%% to pick a random hash from the hashes in the pool.
 
--record(state, {sync_pool = []}).
+-record(state, {sync_pool = [], hash_pool = []}).
 
 start_link() ->
     gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
@@ -175,11 +183,9 @@ init([]) ->
     BlockedPeers = application:get_env(aecore, blocked_peers, []),
     [aec_peers:block_peer(P) || P <- BlockedPeers],
     aec_peers:add_and_ping_peers(Peers, true),
-    %% When we start the top_header may still be unknown... 
-    %% it takes some time to build the chain.
     {ok, #state{}}.
 
-handle_call({new_header, Uri, Header, AgreedHeight, AgreedHash}, _, State) ->
+handle_call({new_header, Pid, Uri, Header, AgreedHeight, AgreedHash}, _, State) ->
     Height = aec_headers:height(Header),
     Difficulty = aec_headers:difficulty(Header),
     %% We have talked to the Uri, so Uri can be trusted
@@ -187,27 +193,68 @@ handle_call({new_header, Uri, Header, AgreedHeight, AgreedHash}, _, State) ->
                                          from = AgreedHeight, 
                                          to = Height, 
                                          hash = AgreedHash, 
-                                         uri = Uri}, 
+                                         uri = Uri,
+                                         pid = Pid}, 
                               State#state.sync_pool),
+    case IsNew of
+        true -> erlang:monitor(process, Pid);
+        false -> ok
+    end,
     {reply, IsNew, State#state{sync_pool = NewPool}};
-handle_call({fetch_chain, Uri, HeightIn, HashIn}, _, State) ->
-    %% Tell me what to fetch now
-    case lists:keyfind(Uri, #sync_peer.uri, State#state.sync_pool) of
-         false ->
-             %% this sync should be canceled
-             {reply, {error, sync_stopped}, State};
-         Sync when Sync#sync_peer.from >= HeightIn ->
-             {reply, {fetch, Sync#sync_peer.from, Sync#sync_peer.to, Sync#sync_peer.hash}, State};
-         Sync when Sync#sync_peer.to < HeightIn ->
-             {reply, {error, sync_stopped}, 
-              State#state{sync_pool = lists:keydelete(Uri, #sync_peer.uri, State#state.sync_pool)}};
-         #sync_peer{to = To} = Sync ->
-             {reply, {fetch, HeightIn, To, HashIn}, 
-              State#state{sync_pool = 
-                            lists:keyreplace(Uri, #sync_peer.uri, 
-                                             State#state.sync_pool, 
-                                             Sync#sync_peer{from = HeightIn, hash = HashIn})}}
+handle_call({update_hash_pool, Hashes}, _From, State) ->
+    HashPool = merge(State#state.hash_pool, Hashes),
+    lager:debug("Hash pool now contains ~p hashes", [length(HashPool)]),
+    {reply, ok, State#state{hash_pool = HashPool}};
+handle_call({fetch_next, Uri, HeightIn, HashIn, Result}, _, State) ->
+    HashPool = 
+       case Result of
+         {ok, Block} ->
+           BlockH = aec_blocks:height(Block),
+           BlockHash = header_hash(Block),
+           %% If the hash of this block does not fit wanted hash, it is discarded
+           %% (In case we ask for block with hash X and we get a block with hash Y)
+           lists:keyreplace({BlockH, BlockHash}, 1,
+                            State#state.hash_pool, {{BlockH, BlockHash}, #{block => Block}});
+         _ ->
+           State#state.hash_pool
+       end,
+    lager:debug("fetch next from Hashpool ~p", [ [ {H, maps:is_key(block, Map)} || {{H,_}, Map} <- HashPool] ]),
+    case update_chain_from_pool(HeightIn, HashIn, HashPool) of
+        {error, Reason} ->
+           lager:error("chain update failed ~p", [Reason]),
+           {reply, {error, sync_stopped}, State#state{hash_pool = HashPool}};
+       {ok, NewHeight, NewHash, []} ->
+           lager:debug("Got all the blocks in hash pool"),
+           %% we might be done, check for more:
+           case lists:keyfind(Uri, #sync_peer.uri, State#state.sync_pool) of
+               false ->
+                   %% this sync should be canceled
+                   {reply, {error, sync_stopped}, State#state{hash_pool = []}};
+               #sync_peer{to = To} when To =< NewHeight ->
+                   {reply, done, State#state{hash_pool = [], 
+                                             sync_pool = 
+                                               lists:keydelete(Uri, #sync_peer.uri, State#state.sync_pool)}};
+               #sync_peer{} ->
+                   {reply, {fill_pool, NewHeight, NewHash}, State#state{hash_pool = []}}
+           end;
+       {ok, NewHeight, NewHash, NewHashPool} ->
+           lager:debug("Updated Hashpool ~p", [ [ {H, maps:is_key(block, Map)} || {{H,_}, Map} <- NewHashPool] ]),
+           case [ {H, Hash} || {{H, Hash}, Map} <- NewHashPool, not maps:is_key(block, Map) ] of
+               [] ->
+                   %% The peer is behaving weird
+                   lager:info("weird peer behaviour ~p at height ~p", [ Uri, NewHeight ]),
+                   {reply, {error, sync_stopped}, 
+                    State#state{hash_pool = NewHashPool,
+                                sync_pool = 
+                                  lists:keydelete(Uri, #sync_peer.uri, State#state.sync_pool)}};
+               PickAHash ->
+                   {PickH, PickHash} = lists:nth(rand:uniform(length(PickAHash)), PickAHash),
+                   lager:debug("Get block at height ~p", [PickH]),
+                   {reply, {fetch, NewHeight, NewHash, PickHash}, State#state{hash_pool = NewHashPool}}
+           end
     end;
+handle_call({sync_in_progress, Uri}, _, State) ->
+    {reply, lists:keyfind(Uri, #sync_peer.uri, State#state.sync_pool), State};
 handle_call(_, _From, State) ->
     {reply, error, State}.
 
@@ -229,9 +276,10 @@ handle_cast({schedule_ping, Uri}, State) ->
     jobs:enqueue(sync_jobs, {ping, Uri}),
     {noreply, State};
 handle_cast({delete_from_pool, Uri}, State) ->
-    %% This Uri misbehaved, even if we got a new Ping inbetween asking for deletion and
+    %% This Uri misbehaved, even if we got a new Ping in-between asking for deletion and
     %% actual deletion, we remove it. A new ping will arrive in the future.
-    {noreply, ok, State#state{sync_pool = lists:keydelete(Uri, #sync_peer.uri, State#state.sync_pool)}};
+    %% If the reference was kept, demonitor could be used here... but just ignore DOWN for these
+    {noreply, State#state{sync_pool = lists:keydelete(Uri, #sync_peer.uri, State#state.sync_pool)}}; 
 handle_cast(_, State) ->
     {noreply, State}.
 
@@ -248,6 +296,12 @@ handle_info({gproc_ps_event, Event, #{info := Info}}, State) ->
         _ -> ignore
     end,
     {noreply, State};
+handle_info({'DOWN', _Ref, process, Pid, Reason}, State) ->
+    %% It might be one of our syncing workers that crashed
+    if Reason =/= normal -> lager:info("worker stopped with reason: ~p", [Reason]);
+       true -> ok
+    end,
+    {noreply, State#state{sync_pool = lists:keydelete(Pid, #sync_peer.pid, State#state.sync_pool)}};
 handle_info(_, State) ->
     {noreply, State}.
 
@@ -277,6 +331,76 @@ insert(#sync_peer{difficulty = Difficulty,
       end,
   {NewUri, lists:keysort(#sync_peer.difficulty, NewPool)}.
 
+
+
+%% both lists are sorted on block height, same height may occur more than once
+%% with different hash 
+merge([], NewHashes) ->
+  NewHashes;
+merge(OldHashes, []) ->
+  OldHashes;
+merge([{{H1, _Hash1}, _} | OldHashes], [{{H2, Hash2}, Map2} | NewHashes]) when H1 < H2 ->
+  %% This is unlikely to happen, it would mean that we agree upon a height that we still
+  %% try to obtain on the chain. Drop it.
+  merge(OldHashes, [{{H2, Hash2}, Map2} | NewHashes]);
+merge([{{H1, Hash1}, Map1} | OldHashes], [{{H2, _Hash2}, _} | NewHashes]) when H1 > H2 ->
+  %% drop Hash2, we have already passed that height. 
+  %% In the very unlikely event that we are on the wrong chain, we will ping with 
+  %% heigher difficulty when this fork has been read.
+  merge([{{H1, Hash1}, Map1} | OldHashes], NewHashes);
+merge(OldHashes, [{{H2, Hash2}, Map2} | NewHashes]) ->
+  %% We are on same height, but pool may have different hashes on that height
+  pick_same({{H2, Hash2}, Map2}, OldHashes, NewHashes).
+
+
+pick_same({{H, Hash2}, Map2}, [{{H, Hash1}, Map1} | OldHashes], NewHashes) ->
+  case Hash1 == Hash2 of
+    true ->
+      %% Same branch of the chain (possibly overwrite uri with newer one)
+      [{{H, Hash1}, maps:merge(Map1, Map2)} | pick_same({{H, Hash2}, Map2}, OldHashes, NewHashes)];
+    false ->
+      [{{H, Hash1}, Map1} | pick_same({{H, Hash2}, Map2}, OldHashes, NewHashes)]
+  end;
+pick_same(_, OldHashes, NewHashes) ->
+  merge(OldHashes, NewHashes).
+
+update_chain_from_pool(AgreedHeight, AgreedHash, HashPool) ->
+    lager:debug("splitting at height ~p with prev hash ~p", [AgreedHeight + 1 , AgreedHash]),
+    case split_hash_pool(AgreedHeight + 1, AgreedHash, HashPool, []) of
+      {_, _, [], Rest} when Rest =/= [] ->
+         lager:error("Cannot split hash pool ~p at ~p: ~p", [Rest, AgreedHeight, AgreedHash]),
+         %% This is weird, we cannot get our next block
+        {error, {stuck_at, AgreedHeight + 1}};
+      {NewAgreedHeight, NewAgreedHash, Same, Rest} ->
+        {ok, NewAgreedHeight, NewAgreedHash, Same ++ Rest}
+    end.
+
+split_hash_pool(Height, PrevHash, [{{H, _},_} | HashPool], Same) when H < Height ->
+    split_hash_pool(Height, PrevHash, HashPool, Same);
+split_hash_pool(Height, PrevHash, [{{H, Hash}, Map} = Item | HashPool], Same) when H == Height ->
+    case maps:get(block, Map, undefined) of
+        undefined ->
+            split_hash_pool(Height, PrevHash, HashPool, [Item | Same]);
+        Block ->
+            %% We are guaranteed that hash and height of block are correct
+            Hash = header_hash(Block),
+            case aec_blocks:prev_hash(Block) of
+              PrevHash ->
+                  lager:debug("Calling post_block(~p) --> hash of header ~p", [pp(Block), Hash]),
+                  case aec_conductor:add_synced_block(Block) of
+                    ok ->
+                      split_hash_pool(H + 1, Hash, HashPool, []); 
+                    {error, _} = Error ->
+                      lager:error("Could not insert ~p: ~p", [Block, Error]),
+                      split_hash_pool(Height, PrevHash, HashPool, Same)
+                  end;  
+              _ ->
+                split_hash_pool(Height, PrevHash, HashPool, [Item | Same])
+            end
+    end;            
+split_hash_pool(Height, PrevHash, HashPool, Same) ->
+    {Height - 1, PrevHash, Same, HashPool}.
+
 %%%=============================================================================
 %%% Jobs worker
 %%%=============================================================================
@@ -294,7 +418,10 @@ process_job([{_T, Job}]) ->
         {forward, #{tx := Tx}, Uri} ->
             do_forward_tx(Tx, Uri);
         {start_sync, Uri, RemoteHash} ->
-            do_start_sync(Uri, RemoteHash);
+            case sync_in_progress(Uri) of
+              false -> do_start_sync(Uri, RemoteHash);
+              _     -> lager:info("sync already in progress ~p", [Uri])
+            end;
         {server_get_missing, Uri} ->
             do_server_get_missing(Uri);
         {fetch_mempool, Uri} ->
@@ -353,15 +480,22 @@ ping_peer(Uri) ->
 %% should be a fraction of a second, if any.
 await_aehttp() ->
     try
-      gproc:await({n,l,{epoch,app,aehttp}}, 10000), % should (almost) never timeout
-      ok
+        gproc:await({n,l,{epoch,app,aehttp}}, 10000), % should (almost) never timeout
+        ok
     catch error:{_Reason, _Args} ->
-      {error, timeout}
+        {error, timeout}
     end.
 
 do_forward_block(Block, Uri) ->
-    Res = aeu_requests:send_block(Uri, Block),
-    lager:debug("send_block Res (~p): ~p", [Uri, Res]).
+    %% If we sync against the Uri and it has far more blocks, ignore sending this one
+    H = aec_blocks:height(Block),
+    case sync_in_progress(Uri) of
+        #sync_peer{to = To} when To > H + ?MAX_DIFF_FOR_SYNC ->
+            lager:debug("not forwarding to (~p): too far ahead", [Uri]);
+         _ ->
+            Res = aeu_requests:send_block(Uri, Block),
+            lager:debug("send_block Res (~p): ~p", [Uri, Res])
+    end.
 
 do_forward_tx(Tx, Uri) ->
     Res = aeu_requests:send_tx(Uri, Tx),
@@ -381,19 +515,20 @@ do_start_sync(Uri, RemoteHash) ->
                case LocalHeight == 0 of
                     true -> 0;
                     false ->
-                      agree_on_height(Uri, Hdr, RemoteHeight, LocalHeader, LocalHeight, LocalHeight, 0)
+                      agree_on_height(Uri, Hdr, RemoteHeight, 
+                                      LocalHeader, LocalHeight, LocalHeight, 0)
                end,
-            %% The prev_hash of next block should be hash_header of block it builds upon
             lager:debug("Agreed upon height (~p): ~p", [Uri, AgreedHeight]),
             {ok, LocalAtHeight} = aec_chain:get_header_by_height(AgreedHeight),
             {ok, AgreedHash} = aec_headers:hash_header(LocalAtHeight), 
+            %% The prev_hash of next block should be AgreedHash
             case new_header(Uri, Hdr, AgreedHeight, AgreedHash) of
                 false ->
                     lager:debug("Already syncing with peer ~p", [Uri]),
-                    %% Already a sync in progress with this peer
                     ok;
                 true ->
-                    fetch_more(Uri, AgreedHeight, AgreedHash)
+                    PoolResult = fill_pool(Uri, AgreedHash),
+                    fetch_more(Uri, AgreedHeight, AgreedHash, PoolResult)
             end;
         {error, Reason} ->
             lager:debug("fetching top block (~p) failed: ~p", [Uri, Reason])
@@ -431,7 +566,7 @@ agree_on_height(Uri, _, RH, LHeader, LH, Max, Min) when RH =/= LH ->
          {error, Reason} ->
              lager:debug("Fetching header ~p from ~p failed: ~p", [LH, Uri, Reason]),
              Min
-    end.   
+    end.
 
 do_server_get_missing(Uri) ->
     aec_events:publish(chain_sync, {server_start, Uri}),
@@ -439,56 +574,45 @@ do_server_get_missing(Uri) ->
     aec_events:publish(chain_sync, {server_done, Uri}).
 
 
-fetch_chain(Uri, FromHeight, ToHeight, _) when FromHeight == ToHeight ->
-    aec_events:publish(chain_sync, {client_done, Uri});
-fetch_chain(Uri, FromH, ToH, HashFromH) when FromH < ToH ->
-    case aeu_requests:get_header_by_height(Uri, FromH + 1) of
-        {ok, Header} ->
-          lager:debug("Header fetched (~p): ~p", [Uri, pp(Header)]),
-          case aec_headers:prev_hash(Header) == HashFromH of
-            true ->
-              {ok, HeaderHash} = aec_headers:hash_header(Header),
-              fetch_chain_from_header(Uri, FromH + 1, HeaderHash); 
-            false ->
-              lager:info("Abort sync due to non-fitting header ~p =/= ", [Header]),
-              delete_from_pool(Uri),
-              {error, sync_abort}
-          end;
-      {error, Reason} ->
-          delete_from_pool(Uri),
-          {error, Reason}
+fill_pool(Uri, AgreedHash) ->
+    case aeu_requests:get_n_successors(Uri, AgreedHash, ?MAX_HEADERS_PER_CHUNK) of
+        {ok, []} ->
+            delete_from_pool(Uri),
+            aec_events:publish(chain_sync, {client_done, Uri}),
+            done;
+        {ok, ChunkHashes} ->
+            HashPool = [ {K, #{uri => Uri}} || K <- ChunkHashes ],
+            lager:debug("We need to get the following hashes: ~p", [HashPool]),
+            update_hash_pool(HashPool),
+            {filled_pool, length(ChunkHashes)-1};
+        {error, _} = Error ->
+            lager:info("Abort sync with ~p (~p) ", [Uri, Error]),
+            delete_from_pool(Uri),
+            {error, sync_abort}
     end.
 
-fetch_chain_from_header(Uri, Height, HeaderHash) ->
-  case do_fetch_block(HeaderHash, Uri) of
-    {ok, true, Block} ->
-      lager:debug("Calling post_block(~p) --> hash of header ~p", [pp(Block), HeaderHash]),
-      case aec_conductor:add_synced_block(Block) of
-        ok ->
-          fetch_more(Uri, Height, HeaderHash);
-        {error, _} = Error ->
-          delete_from_pool(Uri),
-          Error
-      end;
-    {ok, false, _} ->
-      %% More than one sync in progress, the block is already there
-      fetch_more(Uri, Height, HeaderHash);
-    {error, _} = Error ->
-      lager:info("Abort sync due to non-fitting block ~p =/= ", [HeaderHash]),
-      delete_from_pool(Uri),
-      Error
-  end.
-
-fetch_more(Uri, LastHeight, HeaderHash) ->
-  %% We need to supply the Hash, because locally we might have a shorter, 
-  %% but locally more difficult fork
-  case fetch_next(Uri, LastHeight, HeaderHash) of
-    {fetch, NewFrom, NewTo, Hash} -> 
-      fetch_chain(Uri, NewFrom, NewTo, Hash);
-    Error ->
-      lager:info("Abort sync at height ~p Error ~p ", [LastHeight, Error]),
-      delete_from_pool(Uri),
-      Error
+fetch_more(Uri, _, _, done) ->
+    delete_from_pool(Uri),
+    aec_events:publish(chain_sync, {client_done, Uri});
+fetch_more(Uri, LastHeight, _, {error, Error}) ->
+    lager:info("Abort sync at height ~p Error ~p ", [LastHeight, Error]),
+    delete_from_pool(Uri);
+fetch_more(Uri, LastHeight, HeaderHash, Result) ->
+    %% We need to supply the Hash, because locally we might have a shorter, 
+    %% but locally more difficult fork
+    case fetch_next(Uri, LastHeight, HeaderHash, Result) of
+        {fetch, NewHeight, NewHash, Hash} ->
+            case do_fetch_block(Hash, Uri) of
+                {ok, _, NewBlock} ->
+                    fetch_more(Uri, NewHeight, NewHash, {ok, NewBlock});
+                {error, _} = Error ->
+                    fetch_more(Uri, NewHeight, NewHash, Error)
+            end;
+        {fill_pool, AgreedHeight, AgreedHash} ->
+            PoolResult = fill_pool(Uri, AgreedHash),
+            fetch_more(Uri, AgreedHeight, AgreedHash, PoolResult);
+        Other ->
+            fetch_more(Uri, LastHeight, HeaderHash, Other)
   end.
 
 fetch_block(Hash, Uri) ->

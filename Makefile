@@ -45,6 +45,9 @@ local-attach: internal-attach
 prod-package: KIND=prod
 prod-package: internal-package
 
+prod-compile-deps: KIND=prod
+prod-compile-deps: internal-compile-deps
+
 prod-build: KIND=prod
 prod-build: internal-build
 
@@ -57,20 +60,28 @@ prod-stop: internal-stop
 prod-attach: KIND=prod
 prod-attach: internal-attach
 
+prod-clean: KIND=prod
+prod-clean: internal-clean
+
 multi-start:
-	@make dev1-start
-	@make dev2-start
-	@make dev3-start
+	@$(MAKE) dev1-start
+	@$(MAKE) dev2-start
+	@$(MAKE) dev3-start
 
 multi-stop:
-	@make dev1-stop
-	@make dev2-stop
-	@make dev3-stop
+	@$(MAKE) dev1-stop
+	@$(MAKE) dev2-stop
+	@$(MAKE) dev3-stop
 
 multi-clean:
-	@make dev1-clean
-	@make dev2-clean
-	@make dev3-clean
+	@$(MAKE) dev1-clean
+	@$(MAKE) dev2-clean
+	@$(MAKE) dev3-clean
+
+multi-distclean:
+	@$(MAKE) dev1-distclean
+	@$(MAKE) dev2-distclean
+	@$(MAKE) dev3-distclean
 
 dev1-build: KIND=dev1
 dev1-build: internal-build
@@ -87,6 +98,9 @@ dev1-attach: internal-attach
 dev1-clean: KIND=dev1
 dev1-clean: internal-clean
 
+dev1-distclean: KIND=dev1
+dev1-distclean: internal-distclean
+
 dev2-start: KIND=dev2
 dev2-start: internal-start
 
@@ -98,6 +112,9 @@ dev2-attach: internal-attach
 
 dev2-clean: KIND=dev2
 dev2-clean: internal-clean
+
+dev2-distclean: KIND=dev2
+dev2-distclean: internal-distclean
 
 dev3-start: KIND=dev3
 dev3-start: internal-start
@@ -111,6 +128,9 @@ dev3-attach: internal-attach
 dev3-clean: KIND=dev3
 dev3-clean: internal-clean
 
+dev3-distclean: KIND=dev3
+dev3-distclean: internal-distclean
+
 dialyzer-install:
 	@./rebar3 tree
 	@./rebar3 dialyzer -u true -s false
@@ -119,7 +139,12 @@ dialyzer:
 	@./rebar3 dialyzer
 
 test:
-	@./rebar3 as test do release, ct $(CT_TEST_FLAGS) --sys_config config/test.config
+	$(eval EPOCH_PROCESSES := $(shell ps -fea | grep "bin/epoch" | grep -v grep | wc -l))
+	@if [ $(EPOCH_PROCESSES) -gt 0 ] ; then \
+		(echo "Failed testing: another Epoch node is already running" >&2; exit 1);\
+	else \
+		./rebar3 as test do release, ct $(CT_TEST_FLAGS) --sys_config config/test.config; \
+	fi
 
 eunit:
 	@./rebar3 do eunit $(EUNIT_TEST_FLAGS)
@@ -153,7 +178,7 @@ python-uats:
 python-single-uat:
 	( cd $(PYTHON_DIR) && TEST_NAME=$(TEST_NAME) $(MAKE) single-uat; )
 
-python-release-test:
+python-release-test: swagger
 	( cd $(PYTHON_DIR) && WORKDIR="$(WORKDIR)" TARBALL=$(TARBALL) VER=$(VER) $(MAKE) release-test; )
 
 SWAGGER_CODEGEN_CLI_V = 2.3.1
@@ -165,7 +190,6 @@ swagger: config/swagger.yaml $(SWAGGER_CODEGEN_CLI)
 	@echo "Swagger tempdir: $(SWTEMP)"
 	@( mkdir -p $(HTTP_APP)/priv && cp $(SWTEMP)/priv/swagger.json $(HTTP_APP)/priv/; )
 	@( cd $(HTTP_APP) && $(MAKE) updateswagger; )
-	@( mkdir -p $(HTTP_APP)/src/swagger && cp $(SWTEMP)/src/*.erl $(HTTP_APP)/src/swagger; )
 	@rm -fr $(SWTEMP)
 	@./rebar3 swagger_endpoints
 	@$(SWAGGER_CODEGEN) generate -i $< -l python -o $(SWTEMP)
@@ -181,7 +205,6 @@ swagger-check:
 		"$(CURDIR)/config/swagger.yaml" \
 		"swagger" \
 		"$(CURDIR)/apps/aehttp/priv/swagger.json" \
-		"$(CURDIR)/apps/aehttp/src/swagger" \
 		"$(CURDIR)/py/tests/swagger_client"
 
 $(SWAGGER_CODEGEN_CLI):
@@ -204,15 +227,20 @@ clean:
 	@./rebar3 clean
 	( cd apps/aering/test/contracts && $(MAKE) clean; )
 	( cd $(HTTP_APP) && $(MAKE) clean; )
-	@rm -rf _build/
+	@$(MAKE) multi-distclean
+	@rm -rf _build/test _build/prod _build/local
+	@rm -rf _build/default/plugins
+	@rm -rf $$(ls -d _build/default/lib/* | grep -v '[^_]rocksdb') ## Dependency `rocksdb` takes long to build.
 
 distclean: clean
 	( cd apps/aecuckoo && $(MAKE) distclean; )
 	( cd otp_patches && $(MAKE) distclean; )
 	( cd $(HTTP_APP) && $(MAKE) distclean; )
+	@rm -rf _build/
 
 multi-build: dev1-build
-	@rm -rf _build/dev2 _build/dev3
+	@$(MAKE) dev2-distclean
+	@$(MAKE) dev3-distclean
 	@for x in dev2 dev3; do \
 		cp -R _build/dev1 _build/$$x; \
 		cp config/$$x/sys.config _build/$$x/rel/epoch/releases/$(VER)/sys.config; \
@@ -224,6 +252,9 @@ multi-build: dev1-build
 #
 
 .SECONDEXPANSION:
+
+internal-compile-deps: $$(KIND)
+	@./rebar3 as $(KIND) compile --deps-only
 
 internal-package: $$(KIND)
 	@./rebar3 as $(KIND) tar
@@ -241,20 +272,22 @@ internal-attach: $$(KIND)
 	@./_build/$(KIND)/$(CORE) attach
 
 internal-clean: $$(KIND)
-	@rm -rf ./_build/$(KIND)/rel/epoch/data/*
-	@rm -rf ./_build/$(KIND)/rel/epoch/blocks/*
+	@rm -rf ./_build/$(KIND)/rel/epoch/data/mnesia
 	@rm -rf ./_build/$(KIND)/rel/*/log/*
 
+internal-distclean: $$(KIND)
+	@rm -rf ./_build/$(KIND)
 
 
 .PHONY: \
 	all console \
 	local-build local-start local-stop local-attach \
-	prod-build prod-start prod-stop prod-attach prod-package \
-	multi-build, multi-start, multi-stop, multi-clean \
-	dev1-start, dev1-stop, dev1-attach, dev1-clean \
-	dev2-start, dev2-stop, dev2-attach, dev2-clean \
-	dev3-start, dev3-stop, dev3-attach, dev3-clean \
+	prod-build prod-start prod-stop prod-attach prod-package prod-compile-deps \
+	multi-build multi-start multi-stop multi-clean multi-distclean \
+	dev1-start dev1-stop dev1-attach dev1-clean dev1-distclean \
+	dev2-start dev2-stop dev2-attach dev2-clean dev2-distclean \
+	dev3-start dev3-stop dev3-attach dev3-clean dev3-distclean \
+	internal-start internal-stop internal-attach internal-clean internal-compile-deps \
 	dialyzer \
 	test system-test aevm-test-deps\
 	kill killall \

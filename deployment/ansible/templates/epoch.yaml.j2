@@ -1,6 +1,6 @@
 ---
 peers:
-    {% for host in groups[env] | difference([inventory_hostname]) %}
+    {% for host in groups[hosts_group] | difference([inventory_hostname]) %}
 - "http://{{ hostvars[host]['ansible_default_ipv4']['address'] }}:3013/"
     {% endfor %}
 
@@ -15,7 +15,11 @@ http:
 
 mining:
     autostart: true
+    expected_mine_rate: {{ config.mining.expected_mine_rate }}
 
 chain:
     persist: {{ config.chain.persist | bool | lower }}
     db_path: {{ config.chain.db_path }}
+
+logging:
+    level: {{ config.logging.level }}

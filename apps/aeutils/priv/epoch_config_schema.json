@@ -75,6 +75,10 @@
                         "connect_timeout" : {
                             "description" : "HTTP Request connect timeout.",
                             "type" : "integer"
+                        },
+                        "acceptors" : {
+                            "description" : "Number of acceptors in external pool",
+                            "type" : "integer"
                         }
                     }
                 },
@@ -91,7 +95,45 @@
                             "description" :
                             "Listen port for internal HTTP interface.",
                             "type" : "integer"
+                        },
+                        "acceptors" : {
+                            "description" : "Number of acceptors in internal pool",
+                            "type" : "integer"
                         }
+                    }
+                },
+                "endpoints" : {
+                    "gossip" : {
+                        "description" : "Gossip protocol API",
+                        "type" : "boolean"
+                    },
+                    "name_service" : {
+                        "description" : "Name resolution API",
+                        "type" : "boolean"
+                    },
+                    "chain" : {
+                        "description" : "Chain state inspection endpoints",
+                        "type" : "boolean"
+                    },
+                    "transactions" : {
+                        "description" : "Transactions insection endpoints",
+                        "type" : "boolean"
+                    },
+                    "node_operator" : {
+                        "description" : "Node operator endpoints",
+                        "type" : "boolean"
+                    },
+                    "dev" : {
+                        "description" : "Development only API - for validation of client implementations. Should not be used in real life scenrios",
+                        "type" : "boolean"
+                    },
+                    "debug" : {
+                        "description" : "Debug endpoints",
+                        "type" : "boolean"
+                    },
+                    "obsolete" : {
+                        "description" : "Old endpoints that will be removed",
+                        "type" : "boolean"
                     }
                 }
             }
@@ -167,6 +209,12 @@
                     "Maximum time (milliseconds) for each attempt to mine a block with a specific nonce.",
                     "type" : "integer"
                 },
+                "expected_mine_rate" : {
+                    "description" : "Expected mine rate (milliseconds) between blocks. Used in governance.",
+                    "type" : "integer",
+                    "default": 300000,
+                    "minimum" : 1
+                },
                 "cuckoo" : {
                     "type" : "object",
                     "additionalProperties" : false,
@@ -209,7 +257,14 @@
                     "description" :
                     "Controls the overload protection in the logs. Default=50.",
                     "type" : "integer",
-                    "minimum" : 50 }
+                    "minimum" : 50 },
+                "level"   : {
+                    "description" :
+                    "Sets the level of logging in the epoch, mining and cuckoo logs.",
+                    "type": "string",
+                    "enum" : [ "debug", "info", "warning", "error", "none" ],
+                    "default": "debug"
+                }
             }
         },
         "metrics" : {
