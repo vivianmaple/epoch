@@ -17,6 +17,7 @@
     start_node/2,
     stop_node/2, stop_node/3,
     kill_node/2,
+    http_get/5,
     request/4,
     wait_for_height/4,
     assert_synchronized/2
@@ -35,31 +36,28 @@
     name    => node1,
     peers   => [node2],
     backend => aest_docker,
-    source  => {pull, "aetrnty/builder:local"}
-    % source  => {pull, "aetrnty/epoch:v0.8.0"}
+    source  => {pull, "aetrnty/epoch:v0.8.0"}
 }).
 
 -define(NODE2, #{
     name    => node2,
     peers   => [node1],
     backend => aest_docker,
-    source  => {pull, "aetrnty/builder:local"}
-    % source => {pull, "aetrnty/epoch:v0.8.0"}
+    source  => {pull, "aetrnty/epoch:v0.8.0"}
 }).
 
 -define(NODE3, #{
     name    => node3,
     peers   => [node1],
     backend => aest_docker,
-    source  => {pull, "aetrnty/builder:local"}
-    % source  => {pull, "aetrnty/epoch:local"}
+    source  => {pull, "aetrnty/epoch:local"}
 }).
 
 %=== COMMON TEST FUNCTIONS =====================================================
 
 all() -> [
     new_node_joins_network
-    , docker_keeps_data
+    % , docker_keeps_data
     , crash_and_continue_sync
 ].
 
@@ -112,23 +110,42 @@ docker_keeps_data(Cfg) ->
     setup_nodes([?NODE1], Cfg),
     start_node(node1, Cfg),
     wait_for_height(0, [node1], NodeStartupTime, Cfg),
+
+    %% Mine for 20 blocks and calculate the average mining time
     StartTime = os:timestamp(),
     wait_for_height(Length, [node1], Length * ?MINING_TIMEOUT, Cfg),
     EndTime = os:timestamp(),
-    MiningTime = timer:now_diff(EndTime, StartTime) div (1000 * Length),
-    B1 = request(node1, [v2, 'block-by-height'], #{height => Length}, Cfg),
-    ct:log("Node 1 at ~p: ~p~n", [Length, B1]),
-    stop_node(node1, Cfg), %% Is this triggering PT-155851463 ?
+    %% Average mining time per block plus 50% extra
+    MiningTime = round(timer:now_diff(EndTime, StartTime) * 1.5)
+                 div (1000 * Length),
+
+    %% Get all blocks before stopping
+    A = [get_block(node1, H, Cfg) || H <- lists:seq(1, Length)],
+
+    stop_node(node1, infinity, Cfg), %% Is this triggering PT-155851463 ?
     start_node(node1, Cfg),
     wait_for_height(0, [node1], NodeStartupTime, Cfg),
-    ct:log("Node restarted and ready to go"),
-    %% Give it time to read from disk, but not enough to build a new chain of same length
-    timer:sleep(MiningTime * 2),
-    B2 = request(node1, [v2, 'block-by-height'], #{height => Length}, Cfg),
-    ct:log("Node 1 after restart on ~p: ~p~n", [Length, B2]),
-    ?assertEqual(B1, B2),
-    ok.
 
+    ct:log("Node restarted and ready to go"),
+
+    %% Give it time to read from disk, but not enough to build a new chain of same length
+    timer:sleep(MiningTime * 3),
+
+    %% Get all blocks after restarting
+    B = [get_block(node1, H, Cfg) || H <- lists:seq(1, Length)],
+
+    {_, Diff} = lists:foldl(fun({X, Y}, {H, Acc}) ->
+        case X =:= Y of
+            true -> {H + 1, Acc};
+            false ->
+                ct:log("Block ~w changed after restart:~n"
+                       "BEFORE:~n~p~nAFTER:~n~p~n", [H, X, Y]),
+                {H + 1, [H | Acc]}
+        end
+    end, {1, []}, lists:zip(A, B)),
+    ?assertEqual([], Diff),
+
+    ok.
 
 crash_and_continue_sync(Cfg) ->
     BlocksPerSecond = proplists:get_value(blocks_per_second, Cfg),
@@ -161,4 +178,13 @@ crash_and_continue_sync(Cfg) ->
             B2 = request(node2, [v2, 'block-by-height'], #{height => Length}, Cfg),
             ct:log("Node 2 at height ~p: ~p~n", [Length, B2]),
             B1 = B2
+    end.
+
+%=== INTERNAL FUNCTIONS ========================================================
+
+get_block(NodeName, Height, Cfg) ->
+    Query = #{height => Height},
+    case http_get(NodeName, ext_http, [v2, 'block-by-height'], Query, Cfg) of
+        {ok, 200, Block} -> Block;
+        {ok, 404, _} -> undefined
     end.
