@@ -203,7 +203,7 @@ infer_case(Env,Attrs=[{line,Line}],Pattern,ExprType,Branch,SwitchType) ->
     {'case',Attrs,NewPattern,NewBranch}.
 
 %% NewStmts = infer_block(Env,Attrs,Stmts,BlockType)
-infer_block(Env,Attrs,[],BlockType) ->
+infer_block(_Env,Attrs,[],BlockType) ->
     %% DANG! A block with no value. Interpret it as unit.
     unify({tuple_t,Attrs,[]},BlockType),
     [];
@@ -423,7 +423,7 @@ lowest_scores([{M,X},{N,Y}|More]) ->
        M==N ->
 	    [X|lowest_scores([{N,Y}|More])]
     end;
-lowest_scores([{M,X}]) ->
+lowest_scores([{_M,X}]) ->
     [X];
 lowest_scores([]) ->
     [].
@@ -480,7 +480,7 @@ subst_tvars1(Env,[H|T]) ->
     [subst_tvars1(Env,H)|subst_tvars1(Env,T)];
 subst_tvars1(Env,Type) when is_tuple(Type) ->
     list_to_tuple(subst_tvars1(Env,tuple_to_list(Type)));
-subst_tvars1(Env,X) ->
+subst_tvars1(_Env,X) ->
     X.
 
 %% Unification
@@ -494,7 +494,7 @@ unify(T1,T2) ->
 
 unify1({uvar,_,R},{uvar,_,R}) ->
     true;
-unify1({uvar,A,R},T) ->
+unify1({uvar,_A,R},T) ->
     case occurs_check(R,T) of
         %% TODO:
 	%% true ->
@@ -541,7 +541,7 @@ dereference(T = {uvar,_,R}) ->
 dereference(T) ->
     T.
 
-occurs_check(R,T) ->
+occurs_check(_R,_T) ->
     %% TODO
     false.
 
