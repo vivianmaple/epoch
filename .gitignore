@@ -44,3 +44,4 @@ otp_patches/*.erl
 swagger/swagger-codegen-cli-*.jar
 *.erl~
 *.aer~
+system_test/logs
