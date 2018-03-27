@@ -177,7 +177,8 @@ infer_expr(Env,{lam,Attrs,Args,Body}) ->
     NewArgs = [{arg,As,NewPat,NewT} || {typed,As,NewPat,NewT} <- NewArgPatterns],
     {typed,Attrs,{lam,Attrs,NewArgs,NewBody},{fun_t,Attrs,ArgTypes,ResultType}}.
 
-infer_case(Env,Attrs=[{line,Line}],Pattern,ExprType,Branch,SwitchType) ->
+infer_case(Env,Attrs,Pattern,ExprType,Branch,SwitchType) ->
+    Line = line(Attrs),
     Vars = free_vars(Pattern),
     Names = [N || {id,_,N} <- Vars,
 		  N /= "_"],
@@ -291,7 +292,7 @@ solve_field_constraints(Constraints) ->
     %% First look for record fields that appear in only one type definition
     [case ets:lookup(record_fields,FieldName) of
 	 [] ->
-	     [{line,Line}] = Attrs,
+	     Line = line(Attrs),
 	     io:format("Undefined record field ~s on line ~p\n",[FieldName,Line]),
 	     error({undefined_field,FieldName});
 	 [{FieldName,FldType,RecType}] ->
@@ -598,7 +599,9 @@ destroy_and_report_unification_errors() ->
     ets:delete(unification_errors).
 
 line_number(T) when is_tuple(T) ->
-    proplists:get_value(line,element(2,T)).
+    line(element(2, T)).
+
+line(Attrs) -> proplists:get_value(line, Attrs, 0).
 
 pp({type_sig,As,B}) ->
     ["(",pp(As),") => ",pp(B)];
